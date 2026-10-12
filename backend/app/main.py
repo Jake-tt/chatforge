@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +8,7 @@ from sqlalchemy import text
 from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
+from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, usage
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
@@ -24,7 +24,7 @@ def create_app(
 ) -> FastAPI:
     """App factory. Tests inject settings, a fake Redis, a fake LLM and a task queue."""
     settings = settings or get_settings()
-    logging.basicConfig(level=logging.INFO)
+    configure_logging(settings.log_format, settings.gcp_project)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -58,7 +58,10 @@ def create_app(
         allow_origins=settings.cors_origins,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
     )
+    # Added last so it is the outermost layer and also times/logs CORS responses.
+    app.add_middleware(RequestContextMiddleware)
     app.include_router(auth.router)
     app.include_router(conversations.router)
     app.include_router(usage.router)

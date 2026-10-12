@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://chatforge:chatforge@localhost:5432/chatforge"
     redis_url: str = "redis://localhost:6379/0"
     cors_origins: list[str] = ["http://localhost:5173"]
+    log_format: Literal["text", "json"] = "text"  # "json" on Cloud Run
 
     jwt_secret: SecretStr = SecretStr(_DEV_JWT_SECRET)
     user_token_ttl_minutes: int = 60 * 24
