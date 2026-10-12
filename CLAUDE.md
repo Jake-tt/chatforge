@@ -16,6 +16,11 @@
 - Anything that writes usage must run in the same transaction as the data it charges for,
   then call `quota.invalidate(...)` after commit.
 - Background work goes through `TaskQueue`; handlers must be idempotent (at-least-once).
+- Auxiliary LLM calls (RAG routing, source compression, suggestions) must fail soft with a
+  timeout — the chat answer still goes out — and their token usage is charged to the user.
+- Validate model output before it reaches the UI or a prompt (see `suggestions.FollowUps`,
+  `rag._keeps_citations`); structured outputs guarantee shape, not content.
+- Messages are ordered by `seq` (allocated via `_allocate_seq`), never by `created_at`.
 - Errors: raise `errors.ApiError(status, code, message)`; the frontend switches on `code`.
 
 ## Schema changes
