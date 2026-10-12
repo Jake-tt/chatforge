@@ -15,12 +15,19 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
 }
+export interface Citation {
+  n: number;
+  title: string;
+  url: string;
+  snippet: string;
+}
 export interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
   input_tokens: number;
   output_tokens: number;
+  citations: Citation[] | null;
   created_at: string;
 }
 export interface Usage {
@@ -154,6 +161,7 @@ export const api = {
     content: string,
     onDelta: (text: string) => void,
     signal?: AbortSignal,
+    onSources?: (citations: Citation[]) => void,
   ): Promise<StreamDone> {
     const res = await authedFetch(`/conversations/${conversationId}/messages`, {
       method: "POST",
@@ -167,6 +175,7 @@ export const api = {
       if (done) break;
       for (const { event, data } of parser.push(value)) {
         if (event === "delta") onDelta((data as { text: string }).text);
+        else if (event === "sources") onSources?.((data as { citations: Citation[] }).citations);
         else if (event === "done") return data as StreamDone;
         else if (event === "error") {
           const err = data as { code: string; message: string };

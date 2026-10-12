@@ -37,7 +37,8 @@ TITLE_SYSTEM = (
 
 async def generate_title(ctx: AppContext, payload: dict) -> None:
     conversation_id = uuid.UUID(payload["conversation_id"])
-    title = (await ctx.llm.complete(TITLE_SYSTEM, payload["first_message"]))[:200].strip()
+    result = await ctx.llm.complete(TITLE_SYSTEM, payload["first_message"])
+    title = result.text[:200].strip()
     if not title:
         return
     async with ctx.sessionmaker() as session:

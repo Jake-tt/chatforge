@@ -132,3 +132,9 @@ body { background: var(--bg); color: var(--text); }
   .sidebar { width: 100%; max-height: 40vh; border-right: 0; border-bottom: 1px solid var(--border); }
   .icon-btn { visibility: visible; }
 }
+
+.sources {
+  margin: 10px 0 0; padding: 8px 0 0 20px; border-top: 1px solid var(--border);
+  font-size: 12.5px; color: var(--muted); white-space: normal; display: grid; gap: 2px;
+}
+.sources li::marker { font-variant-numeric: tabular-nums; }

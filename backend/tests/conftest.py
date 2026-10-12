@@ -29,6 +29,8 @@ def database_url(tmp_path) -> str:
 @pytest.fixture
 def make_settings(database_url) -> Callable[..., Settings]:
     def _make(**overrides) -> Settings:
+        # RAG is off unless a test opts in, so chat tests keep exact token counts.
+        overrides.setdefault("rag_enabled", False)
         return Settings(env="test", database_url=database_url, _env_file=None, **overrides)
     return _make
 
@@ -80,6 +82,8 @@ class SSEResult:
         result = cls(response)
         if response.headers.get("content-type", "").startswith("text/event-stream"):
             for block in response.text.strip().split("\n\n"):
+                if block.startswith(":"):
+                    continue  # SSE comment (header flush / keep-alive)
                 lines = dict(line.split(": ", 1) for line in block.splitlines())
                 result.events.append((lines["event"], json.loads(lines["data"])))
         return result
@@ -98,7 +102,8 @@ async def make_harness(make_settings):
     stack: list = []
 
     async def _make(
-        *, llm: LLMProvider | None = None, redis=None, tasks=None, **settings_overrides
+        *, llm: LLMProvider | None = None, redis=None, tasks=None, search=None,
+        **settings_overrides,
     ) -> Harness:
         settings = make_settings(**settings_overrides)
         app = create_app(
@@ -106,6 +111,7 @@ async def make_harness(make_settings):
             redis=redis or fakeredis.FakeAsyncRedis(decode_responses=True),
             llm=llm or FakeProvider(),
             tasks=tasks,
+            search=search,
         )
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()

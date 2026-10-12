@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import SecretStr, model_validator
@@ -26,7 +27,18 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-opus-5-5"
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     llm_max_tokens: int = 16000
+    llm_aux_model: str = "claude-opus-5-5"  # router, summaries, titles
     history_limit: int = 20
+
+    # RAG over the help-center knowledge base
+    rag_enabled: bool = True
+    knowledge_dir: str = str(Path(__file__).resolve().parent.parent / "knowledge")
+    search_top_k: int = 4
+    router_timeout_seconds: float = 8.0
+    search_timeout_seconds: float = 5.0
+    search_after_turns: int = 3  # from this many user turns on, search whenever a query exists
+    grounding_char_budget: int = 1500  # longer source text is compressed
+    summary_char_limit: int = 1000
     system_prompt: str = "You are a concise, friendly assistant. Answer in the user's language."
 
     # Quotas — tokens per calendar day in `quota_timezone`

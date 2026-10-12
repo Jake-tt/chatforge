@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import anthropic
+from pydantic import BaseModel
 
 from app.config import Settings
 
@@ -35,6 +36,26 @@ class Completion:
 StreamEvent = TextDelta | Completion
 
 
+@dataclass(frozen=True)
+class Usage:
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(self.input_tokens + other.input_tokens,
+                     self.output_tokens + other.output_tokens)
+
+
+@dataclass(frozen=True)
+class TextResult:
+    text: str
+    usage: Usage
+
+
 class LLMError(Exception):
     def __init__(self, message: str, retryable: bool):
         super().__init__(message)
@@ -46,7 +67,13 @@ class LLMProvider(Protocol):
         """Yield TextDelta chunks, then exactly one Completion."""
         ...
 
-    async def complete(self, system: str, prompt: str) -> str: ...
+    async def complete(self, system: str, prompt: str) -> TextResult: ...
+
+    async def structured[M: BaseModel](
+        self, system: str, prompt: str, schema: type[M]
+    ) -> tuple[M, Usage]:
+        """Return an instance of `schema`; raise LLMError if the model can't produce one."""
+        ...
 
 
 class AnthropicProvider:
@@ -56,6 +83,7 @@ class AnthropicProvider:
     def __init__(self, settings: Settings):
         self._client = anthropic.AsyncAnthropic()
         self._model = settings.anthropic_model
+        self._aux_model = settings.llm_aux_model  # router, summaries, titles
         self._effort = settings.llm_effort
         self._max_tokens = settings.llm_max_tokens
 
@@ -83,17 +111,42 @@ class AnthropicProvider:
             stop_reason=final.stop_reason,
         )
 
-    async def complete(self, system: str, prompt: str) -> str:
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=1024,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-            output_config={"effort": "low"},
-        )
+    async def complete(self, system: str, prompt: str) -> TextResult:
+        try:
+            response = await self._client.messages.create(
+                model=self._aux_model,
+                max_tokens=2048,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                output_config={"effort": "low"},
+            )
+        except anthropic.APIError as exc:
+            raise LLMError(str(exc), retryable=True) from exc
+        usage = Usage(response.usage.input_tokens, response.usage.output_tokens)
         if response.stop_reason == "refusal":
-            return ""
-        return "".join(b.text for b in response.content if b.type == "text").strip()
+            return TextResult("", usage)
+        text = "".join(b.text for b in response.content if b.type == "text").strip()
+        return TextResult(text, usage)
+
+    async def structured[M: BaseModel](
+        self, system: str, prompt: str, schema: type[M]
+    ) -> tuple[M, Usage]:
+        try:
+            response = await self._client.messages.parse(
+                model=self._aux_model,
+                max_tokens=2048,
+                system=system,
+                messages=[{"role": "user", "content": prompt}],
+                output_format=schema,
+                output_config={"effort": "low"},
+            )
+        except anthropic.APIError as exc:
+            raise LLMError(str(exc), retryable=True) from exc
+        if response.stop_reason == "refusal" or response.parsed_output is None:
+            raise LLMError(f"no structured output (stop_reason={response.stop_reason})",
+                           retryable=False)
+        return response.parsed_output, Usage(response.usage.input_tokens,
+                                             response.usage.output_tokens)
 
 
 class FakeProvider:
@@ -112,8 +165,18 @@ class FakeProvider:
         input_tokens = sum(len(t.content.split()) for t in turns) + len(system.split())
         yield Completion(input_tokens, output_tokens=len(words), stop_reason="end_turn")
 
-    async def complete(self, system: str, prompt: str) -> str:
-        return " ".join(prompt.split()[-6:])
+    async def complete(self, system: str, prompt: str) -> TextResult:
+        words = prompt.split()
+        return TextResult(" ".join(words[-6:]), Usage(len(words), min(len(words), 6)))
+
+    async def structured[M: BaseModel](
+        self, system: str, prompt: str, schema: type[M]
+    ) -> tuple[M, Usage]:
+        # Schemas used with the fake provide a deterministic stand-in via `fake(prompt)`.
+        fake = getattr(schema, "fake", None)
+        if fake is None:
+            raise LLMError(f"FakeProvider can't produce {schema.__name__}", retryable=False)
+        return fake(prompt), Usage(len(prompt.split()), 5)
 
 
 def build_provider(settings: Settings) -> LLMProvider:

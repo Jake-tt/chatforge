@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,7 +14,9 @@ from app.routers import auth, conversations, internal, usage
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
+from app.services.rag import RagPipeline
 from app.services.redis_guard import RedisGuard
+from app.services.search import BM25Search, SearchProvider, load_markdown_corpus
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 
 
@@ -23,8 +26,9 @@ def create_app(
     redis: Redis | None = None,
     llm: LLMProvider | None = None,
     tasks: TaskQueue | None = None,
+    search: SearchProvider | None = None,
 ) -> FastAPI:
-    """App factory. Tests inject settings, a fake Redis, a fake LLM and a task queue."""
+    """App factory. Tests inject settings, fake Redis/LLM/search and a task queue."""
     settings = settings or get_settings()
     configure_logging(settings.log_format, settings.gcp_project)
 
@@ -38,15 +42,17 @@ def create_app(
             else InlineTaskQueue(lambda: app.state.ctx)
         )
         guard = RedisGuard(redis_client)
+        provider = llm or build_provider(settings)
         app.state.ctx = AppContext(
             settings=settings,
             engine=engine,
             sessionmaker=create_sessionmaker(engine),
             redis=redis_client,
             redis_guard=guard,
-            llm=llm or build_provider(settings),
+            llm=provider,
             quota=QuotaService(guard, settings.quota_timezone),
             history=HistoryCache(guard, settings.history_limit),
+            rag=_build_rag(settings, provider, search),
             tasks=queue,
         )
         try:
@@ -80,3 +86,19 @@ def create_app(
         return {"status": "ok"}
 
     return app
+
+
+def _build_rag(
+    settings: Settings, llm: LLMProvider, search: SearchProvider | None
+) -> RagPipeline | None:
+    if not settings.rag_enabled:
+        return None
+    if search is None:
+        documents = load_markdown_corpus(settings.knowledge_dir)
+        if not documents:
+            logging.getLogger(__name__).warning(
+                "RAG enabled but no documents in %s; disabling", settings.knowledge_dir
+            )
+            return None
+        search = BM25Search(documents)
+    return RagPipeline(llm, search, settings)

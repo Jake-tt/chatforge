@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, Citation } from "../api";
 
 interface Bubble {
   id: string;
@@ -7,6 +7,7 @@ interface Bubble {
   content: string;
   pending?: boolean;
   note?: string;
+  citations?: Citation[] | null;
 }
 
 interface Props {
@@ -76,6 +77,7 @@ export default function ChatPanel(props: Props) {
         content,
         (text) => updateLast((b) => ({ ...b, content: b.content + text })),
         controller.signal,
+        (citations) => updateLast((b) => ({ ...b, citations })),
       );
       updateLast((b) => ({
         ...b,
@@ -122,6 +124,15 @@ export default function ChatPanel(props: Props) {
           <div key={b.id} className={`bubble ${b.role}`}>
             {b.content || (b.pending ? <span className="typing">●●●</span> : null)}
             {b.note && <div className="note">{b.note}</div>}
+            {b.citations && b.citations.length > 0 && (
+              <ol className="sources" aria-label="참고한 자료">
+                {b.citations.map((c) => (
+                  <li key={c.n} value={c.n} title={c.snippet}>
+                    {c.title}
+                  </li>
+                ))}
+              </ol>
+            )}
           </div>
         ))}
         <div ref={bottomRef} />

@@ -24,7 +24,7 @@ from app.schemas import (
     MessageCreate,
 )
 from app.services.history import HistoryEntry
-from app.services.llm import ChatTurn, Completion, LLMError, TextDelta
+from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage
 
 log = logging.getLogger(__name__)
 
@@ -197,14 +197,26 @@ async def _stream_reply(
     parts: list[str] = []
     completion: Completion | None = None
     system = ctx.settings.system_prompt
+    aux_usage = Usage()  # routing + source compression, charged with the answer
+    citations: list[dict] | None = None
 
-    def estimated_usage() -> tuple[int, int]:
+    def estimated_usage() -> Usage:
         # Aborted streams don't report final usage; charge an estimate so that
         # disconnecting mid-reply can't be used to dodge the quota.
         prompt = system + "".join(t.content for t in turns)
-        return _estimate_tokens(prompt), _estimate_tokens("".join(parts))
+        return aux_usage + Usage(_estimate_tokens(prompt), _estimate_tokens("".join(parts)))
 
     try:
+        if ctx.rag is not None:
+            # Flush headers now; routing and search take a moment before the first token.
+            yield ": grounding\n\n"
+            result = await ctx.rag.ground(turns)
+            aux_usage = result.usage
+            if result.grounding is not None:
+                system += result.grounding.context
+                citations = [c.as_dict() for c in result.grounding.citations]
+                yield _sse("sources", {"citations": citations})
+
         async with aclosing(ctx.llm.stream(system, turns)) as events:
             async for event in events:
                 if isinstance(event, TextDelta):
@@ -214,25 +226,23 @@ async def _stream_reply(
                     completion = event
     except LLMError as exc:
         log.warning("llm stream failed: %s", exc)
-        if parts:
-            await _persist_reply(ctx, principal, conversation_id, "".join(parts),
-                                 *estimated_usage())
+        await _persist_reply(ctx, principal, conversation_id, "".join(parts),
+                             estimated_usage(), citations)
         yield _sse("error", {"code": "llm_unavailable",
                              "message": "The model is unavailable, please retry",
                              "retryable": exc.retryable})
         return
     except (asyncio.CancelledError, GeneratorExit):
-        if parts:
-            # Shielded so the write survives the cancellation of this request.
-            await asyncio.shield(_persist_reply(
-                ctx, principal, conversation_id, "".join(parts), *estimated_usage()
-            ))
+        # Shielded so the write survives the cancellation of this request.
+        await asyncio.shield(_persist_reply(
+            ctx, principal, conversation_id, "".join(parts), estimated_usage(), citations
+        ))
         raise
 
     assert completion is not None, "provider must finish with a Completion"
+    usage = aux_usage + Usage(completion.input_tokens, completion.output_tokens)
     message_id = await _persist_reply(
-        ctx, principal, conversation_id, "".join(parts),
-        completion.input_tokens, completion.output_tokens,
+        ctx, principal, conversation_id, "".join(parts), usage, citations
     )
     if is_first_message:
         await ctx.tasks.enqueue("generate_title", {
@@ -240,8 +250,8 @@ async def _stream_reply(
         })
     yield _sse("done", {
         "message_id": str(message_id),
-        "input_tokens": completion.input_tokens,
-        "output_tokens": completion.output_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
         "stop_reason": completion.stop_reason,
     })
 
@@ -251,21 +261,32 @@ async def _persist_reply(
     principal: Principal,
     conversation_id: uuid.UUID,
     text: str,
-    input_tokens: int,
-    output_tokens: int,
-) -> uuid.UUID:
-    """Store the assistant message and charge its tokens in one transaction."""
+    usage: Usage,
+    citations: list[dict] | None,
+) -> uuid.UUID | None:
+    """Store the assistant message and charge its tokens in one transaction.
+
+    With no text (failed or cancelled before the first token) only the tokens already
+    spent on routing/search are charged, and no empty message is stored.
+    """
+    if not text and not usage.total:
+        return None
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
-        seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
-        message = Message(
-            conversation_id=conversation_id, seq=seq, role="assistant", content=text,
-            input_tokens=input_tokens, output_tokens=output_tokens,
-        )
-        session.add(message)
-        await ctx.quota.add_usage(session, principal.subject, input_tokens + output_tokens)
+        message = None
+        if text:
+            seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
+            message = Message(
+                conversation_id=conversation_id, seq=seq, role="assistant", content=text,
+                input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                citations=citations,
+            )
+            session.add(message)
+        await ctx.quota.add_usage(session, principal.subject, usage.total)
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
+    if message is None:
+        return None
     await ctx.history.append(principal.subject, conversation_id,
-                             HistoryEntry(seq, "assistant", text))
+                             HistoryEntry(message.seq, "assistant", text))
     return message.id

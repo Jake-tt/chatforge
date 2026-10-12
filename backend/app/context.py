@@ -7,6 +7,7 @@ from app.config import Settings
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider
 from app.services.quota import QuotaService
+from app.services.rag import RagPipeline
 from app.services.redis_guard import RedisGuard
 from app.services.tasks import TaskQueue
 
@@ -23,4 +24,5 @@ class AppContext:
     llm: LLMProvider
     quota: QuotaService
     history: HistoryCache
+    rag: RagPipeline | None
     tasks: TaskQueue

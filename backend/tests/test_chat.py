@@ -1,6 +1,14 @@
 from collections.abc import AsyncIterator
 
-from app.services.llm import ChatTurn, Completion, LLMError, StreamEvent, TextDelta
+from app.services.llm import (
+    ChatTurn,
+    Completion,
+    LLMError,
+    StreamEvent,
+    TextDelta,
+    TextResult,
+    Usage,
+)
 
 
 async def test_stream_reply_is_persisted_and_charged(h):
@@ -44,8 +52,8 @@ class RecordingProvider:
         yield TextDelta(f"reply {len(self.calls)}")
         yield Completion(input_tokens=1, output_tokens=1, stop_reason="end_turn")
 
-    async def complete(self, system: str, prompt: str) -> str:
-        return "title"
+    async def complete(self, system: str, prompt: str) -> TextResult:
+        return TextResult("title", Usage())
 
 
 async def test_history_is_sent_and_windowed(make_harness):
@@ -112,8 +120,8 @@ class FailingMidStream:
         yield TextDelta("partial answer ")
         raise LLMError("upstream overloaded", retryable=True)
 
-    async def complete(self, system: str, prompt: str) -> str:
-        return ""
+    async def complete(self, system: str, prompt: str) -> TextResult:
+        return TextResult("", Usage())
 
 
 async def test_llm_failure_mid_stream_keeps_partial_and_charges_estimate(make_harness):

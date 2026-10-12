@@ -13,6 +13,7 @@ RUN mkdir app && touch app/__init__.py && pip install ".[gcp]" && rm -rf app
 
 COPY app ./app
 COPY migrations ./migrations
+COPY knowledge ./knowledge
 COPY alembic.ini ./
 
 RUN useradd --create-home appuser

@@ -63,6 +63,13 @@ class ConversationOut(BaseModel):
     updated_at: datetime
 
 
+class CitationOut(BaseModel):
+    n: int
+    title: str
+    url: str
+    snippet: str
+
+
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -71,6 +78,7 @@ class MessageOut(BaseModel):
     content: str
     input_tokens: int
     output_tokens: int
+    citations: list[CitationOut] | None = None
     created_at: datetime
 
 
