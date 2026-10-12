@@ -1,0 +1,40 @@
+# Local stack: Postgres + Redis + API. Run the frontend with `npm run dev` in ./frontend.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: chatforge
+      POSTGRES_PASSWORD: chatforge
+      POSTGRES_DB: chatforge
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatforge"]
+      interval: 2s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  migrate:
+    build: ./backend
+    command: alembic upgrade head
+    environment: &api-env
+      DATABASE_URL: postgresql+asyncpg://chatforge:chatforge@postgres:5432/chatforge
+      REDIS_URL: redis://redis:6379/0
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  api:
+    build: ./backend
+    environment: *api-env
+    ports: ["8000:8000"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_started }
+
+volumes:
+  pgdata:
