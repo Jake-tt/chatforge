@@ -10,8 +10,10 @@ from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, usage
+from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
+from app.services.redis_guard import RedisGuard
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 
 
@@ -35,13 +37,16 @@ def create_app(
             if settings.task_backend == "cloudtasks"
             else InlineTaskQueue(lambda: app.state.ctx)
         )
+        guard = RedisGuard(redis_client)
         app.state.ctx = AppContext(
             settings=settings,
             engine=engine,
             sessionmaker=create_sessionmaker(engine),
             redis=redis_client,
+            redis_guard=guard,
             llm=llm or build_provider(settings),
-            quota=QuotaService(redis_client, settings.quota_timezone),
+            quota=QuotaService(guard, settings.quota_timezone),
+            history=HistoryCache(guard, settings.history_limit),
             tasks=queue,
         )
         try:

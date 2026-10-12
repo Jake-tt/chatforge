@@ -78,5 +78,9 @@ class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
 
 
+class BulkDeleteOut(BaseModel):
+    deleted: int
+
+
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=8000)

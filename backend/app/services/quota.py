@@ -9,32 +9,23 @@ Design:
   staleness to a few minutes, which is acceptable for a soft daily quota.
 - If Redis is down, quota checks fall back to the database (still enforced), while the
   per-minute rate limiter fails open (availability over strictness for a soft limit).
-  A small circuit breaker skips Redis for a few seconds after a failure, so an outage costs
-  one connect timeout per breaker window instead of one per request.
+  Redis access goes through `RedisGuard`, whose circuit breaker keeps an outage cheap.
 """
 
-import logging
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import TypeVar
 from zoneinfo import ZoneInfo
 
 from redis.asyncio import Redis
-from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import UsageDaily
-
-log = logging.getLogger(__name__)
+from app.services.redis_guard import RedisGuard
 
 USAGE_CACHE_TTL_SECONDS = 300
-REDIS_COOLDOWN_SECONDS = 10.0
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -53,10 +44,9 @@ class QuotaStatus:
 
 
 class QuotaService:
-    def __init__(self, redis: Redis, timezone: str):
-        self._redis = redis
+    def __init__(self, guard: RedisGuard, timezone: str):
+        self._guard = guard
         self._tz = ZoneInfo(timezone)
-        self._redis_down_until = 0.0
 
     def today(self) -> date:
         return datetime.now(self._tz).date()
@@ -68,28 +58,17 @@ class QuotaService:
     def _usage_key(subject: str, day: date) -> str:
         return f"usage:{subject}:{day.isoformat()}"
 
-    async def _redis_call(self, op: Callable[[Redis], Awaitable[T]], default: T) -> T:
-        """Run a Redis operation; on failure (or while the breaker is open) return `default`."""
-        if time.monotonic() < self._redis_down_until:
-            return default
-        try:
-            return await op(self._redis)
-        except RedisError as exc:
-            self._redis_down_until = time.monotonic() + REDIS_COOLDOWN_SECONDS
-            log.warning("redis unavailable, bypassing for %ss: %s", REDIS_COOLDOWN_SECONDS, exc)
-            return default
-
     async def status(self, session: AsyncSession, subject: str, limit: int) -> QuotaStatus:
         day = self.today()
         return QuotaStatus(await self._used(session, subject, day), limit, self._resets_at(day))
 
     async def _used(self, session: AsyncSession, subject: str, day: date) -> int:
         key = self._usage_key(subject, day)
-        cached = await self._redis_call(lambda r: r.get(key), None)
+        cached = await self._guard.call(lambda r: r.get(key), None)
         if cached is not None:
             return int(cached)
         used = await self._used_from_db(session, subject, day)
-        await self._redis_call(lambda r: r.set(key, used, ex=USAGE_CACHE_TTL_SECONDS), None)
+        await self._guard.call(lambda r: r.set(key, used, ex=USAGE_CACHE_TTL_SECONDS), None)
         return used
 
     @staticmethod
@@ -118,7 +97,7 @@ class QuotaService:
         day = day or self.today()
         keys = [self._usage_key(s, day) for s in subjects]
         # If this fails, the stale value expires with the short TTL; the DB stays correct.
-        await self._redis_call(lambda r: r.delete(*keys), None)
+        await self._guard.call(lambda r: r.delete(*keys), None)
 
     async def hit_rate_limit(self, bucket: str, limit: int, window_seconds: int) -> bool:
         """Fixed-window counter. Returns True when the caller is over the limit."""
@@ -131,5 +110,5 @@ class QuotaService:
                 count, _ = await pipe.execute()
             return count
 
-        count = await self._redis_call(incr, 0)  # fail open
+        count = await self._guard.call(incr, 0)  # fail open
         return count > limit

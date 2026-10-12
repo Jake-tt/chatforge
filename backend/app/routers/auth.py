@@ -81,6 +81,8 @@ async def _finish_auth(
     await session.commit()
     if claim and claim.status == "claimed":
         await ctx.quota.invalidate(user_subject(user.id), guest_subject(claims.subject_id))
+        # Cached histories are keyed by owner; the guest's keys are now unreachable.
+        await ctx.history.invalidate_owner(guest_subject(claims.subject_id))
 
     token = create_token("user", user.id, secret, ctx.settings.user_token_ttl_minutes)
     return AuthOut(

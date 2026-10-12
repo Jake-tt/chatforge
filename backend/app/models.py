@@ -11,6 +11,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -74,22 +75,28 @@ class Conversation(Base):
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Incremented atomically per message; the new value becomes that message's `seq`.
+    message_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
-        back_populates="conversation", order_by="Message.created_at"
+        back_populates="conversation", order_by="Message.seq"
     )
 
 
 class Message(Base):
     __tablename__ = "messages"
     __table_args__ = (
-        Index("ix_messages_conversation_id_created_at", "conversation_id", "created_at"),
+        # Also the index for reading a conversation's messages in order.
+        UniqueConstraint("conversation_id", "seq", name="uq_messages_conversation_id_seq"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     conversation_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE")
     )
+    # 1-based position in the conversation. Gives a total order (timestamps can tie) and
+    # lets caches detect a missing message: cached seqs must be contiguous.
+    seq: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
     content: Mapped[str] = mapped_column(Text)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

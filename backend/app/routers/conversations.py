@@ -16,7 +16,14 @@ from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
 from app.models import Conversation, Message
-from app.schemas import ConversationCreate, ConversationDetail, ConversationOut, MessageCreate
+from app.schemas import (
+    BulkDeleteOut,
+    ConversationCreate,
+    ConversationDetail,
+    ConversationOut,
+    MessageCreate,
+)
+from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, Completion, LLMError, TextDelta
 
 log = logging.getLogger(__name__)
@@ -81,12 +88,29 @@ async def get_conversation(
 async def delete_conversation(
     conversation_id: uuid.UUID,
     principal: Principal = Depends(get_principal),
+    ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     conversation = await _get_owned(session, principal, conversation_id)
     conversation.deleted_at = datetime.now(UTC)
     await session.commit()
+    await ctx.history.invalidate(principal.subject, conversation.id)
     return Response(status_code=204)
+
+
+@router.delete("", response_model=BulkDeleteOut)
+async def delete_all_conversations(
+    principal: Principal = Depends(get_principal),
+    ctx: AppContext = Depends(get_ctx),
+    session: AsyncSession = Depends(get_session),
+) -> BulkDeleteOut:
+    result = await session.execute(
+        update(Conversation).where(_owned_by(principal)).values(deleted_at=datetime.now(UTC))
+    )
+    await session.commit()
+    # Pattern delete over this owner's cache keys, via SCAN (never KEYS).
+    await ctx.history.invalidate_owner(principal.subject)
+    return BulkDeleteOut(deleted=result.rowcount)
 
 
 @router.post("/{conversation_id}/messages")
@@ -115,17 +139,15 @@ async def send_message(
     if quota.exceeded:
         raise ApiError(429, "quota_exceeded", "Daily token limit reached")
 
-    session.add(Message(conversation_id=conversation.id, role="user", content=body.content))
-    await session.flush()
-    recent = list(await session.scalars(
-        select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc())
-        .limit(settings.history_limit)
-    ))[::-1]
-    is_first_message = len(recent) == 1 and conversation.title is None
+    seq = await _allocate_seq(session, conversation.id)
+    session.add(Message(conversation_id=conversation.id, seq=seq, role="user",
+                        content=body.content))
     await session.commit()
+    await ctx.history.append(principal.subject, conversation.id,
+                             HistoryEntry(seq, "user", body.content))
 
+    recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
+    is_first_message = seq == 1 and conversation.title is None
     turns = _to_turns(recent)
     return StreamingResponse(
         _stream_reply(ctx, principal, conversation.id, turns, body.content, is_first_message),
@@ -134,8 +156,22 @@ async def send_message(
     )
 
 
-def _to_turns(messages: list[Message]) -> list[ChatTurn]:
-    turns = [ChatTurn(m.role, m.content) for m in messages if m.content]
+async def _allocate_seq(session: AsyncSession, conversation_id: uuid.UUID, **values) -> int:
+    """Atomically bump message_count and return it as the new message's seq.
+
+    The UPDATE takes a row lock, so concurrent messages in one conversation get distinct,
+    gap-free numbers.
+    """
+    return await session.scalar(
+        update(Conversation)
+        .where(Conversation.id == conversation_id)
+        .values(message_count=Conversation.message_count + 1, **values)
+        .returning(Conversation.message_count)
+    )
+
+
+def _to_turns(entries: list[HistoryEntry]) -> list[ChatTurn]:
+    turns = [e.to_turn() for e in entries if e.content]
     # The history window may start mid-exchange; the API requires a user turn first.
     while turns and turns[0].role != "user":
         turns.pop(0)
@@ -221,17 +257,15 @@ async def _persist_reply(
     """Store the assistant message and charge its tokens in one transaction."""
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
+        seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
         message = Message(
-            conversation_id=conversation_id, role="assistant", content=text,
+            conversation_id=conversation_id, seq=seq, role="assistant", content=text,
             input_tokens=input_tokens, output_tokens=output_tokens,
         )
         session.add(message)
-        await session.execute(
-            update(Conversation)
-            .where(Conversation.id == conversation_id)
-            .values(updated_at=datetime.now(UTC))
-        )
         await ctx.quota.add_usage(session, principal.subject, input_tokens + output_tokens)
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
+    await ctx.history.append(principal.subject, conversation_id,
+                             HistoryEntry(seq, "assistant", text))
     return message.id

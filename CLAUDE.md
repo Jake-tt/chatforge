@@ -10,8 +10,9 @@
 - Routes depend on `AppContext` (built in `main.py` lifespan) via `deps.get_ctx`; never create
   engines, Redis clients or LLM clients inside a route.
 - LLM access only through `services.llm.LLMProvider`. Tests use `FakeProvider` or a stub.
-- `usage_daily` is the source of truth for quotas. Redis access goes through
-  `QuotaService._redis_call` so the circuit breaker covers it.
+- `usage_daily` is the source of truth for quotas. All Redis access goes through
+  `services.redis_guard.RedisGuard` so the circuit breaker covers it. Never use `KEYS`;
+  use `RedisGuard.scan_delete` for pattern deletes.
 - Anything that writes usage must run in the same transaction as the data it charges for,
   then call `quota.invalidate(...)` after commit.
 - Background work goes through `TaskQueue`; handlers must be idempotent (at-least-once).

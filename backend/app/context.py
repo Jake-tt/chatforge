@@ -4,8 +4,10 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.services.history import HistoryCache
 from app.services.llm import LLMProvider
 from app.services.quota import QuotaService
+from app.services.redis_guard import RedisGuard
 from app.services.tasks import TaskQueue
 
 
@@ -17,6 +19,8 @@ class AppContext:
     engine: AsyncEngine
     sessionmaker: async_sessionmaker[AsyncSession]
     redis: Redis
+    redis_guard: RedisGuard
     llm: LLMProvider
     quota: QuotaService
+    history: HistoryCache
     tasks: TaskQueue
