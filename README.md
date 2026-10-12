@@ -210,3 +210,17 @@ deploy/                # GCP 셋업·배포 스크립트
 - **에이전트 결과 검증**: 서브에이전트의 "없다"는 보고는 직접 확인
 - **머지 정책**: branch protection이 없는 환경에서 `--auto` 머지가 CI를 기다리지 않아 기본 브랜치가 깨진 실제 사고를 계기로 만든 위험도별 머지 규칙
 - **Claude 자산 관리**: 규칙, skill, subagent 중 무엇으로 만들지 판단하는 결정 트리
+
+### 에이전트 워크플로 (`.claude/skills/`)
+
+| skill | 역할 |
+|---|---|
+| `code-review` | 변경 범위(BACKEND, DATABASE, LLM, FRONTEND, DECISIONS, INFRA)별 전문가 에이전트를 병렬 실행하고, 확신도로 분류한 뒤 기계적 문제는 먼저 고치고 판정 리포트를 냄. "단위 테스트에 mock이 몇 개 필요한가"로 테스트 가능성을 판정 |
+| `decision-interview` | 구현 전에 기존 결정을 먼저 검색하고, 정할 것만 한 번에 하나씩 추천안과 함께 질문 |
+| `verification-plan` | 결정별 위험도에 따라 검증 패키지(Minimal / Standard / Strict) 하나를 합의 |
+| `delivery-plan` | 작업을 Vertical 조각으로 나누고 에이전트 단독 진행(AFK)과 사람 개입(HITL)을 구분 |
+| `decision-map` · `extract-test-decisions` · `promote-decisions` | 코드 경로 ↔ 결정 ↔ 테스트 케이스 연결을 유지하고, 쌓인 결정을 spec·ADR로 승격 |
+
+결정 기록은 [`decision-docs/`](decision-docs)에 있고, [`scripts/decisions.py`](scripts/decisions.py)로 조회·검증합니다(테스트 케이스 55/55 연결, CI에서 검증).
+
+> 이 skill들은 실무에서 동료 **정준** 님이 만든 원본을 제가 수정해 사용하던 것이며, 이 저장소에 맞게 경로와 명령을 바꿔 다시 썼습니다. 결정 검색 도구(`scripts/decisions.py`)는 이 저장소용으로 새로 구현했습니다.

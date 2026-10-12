@@ -117,6 +117,23 @@ GitHub 무료 플랜에서는 branch protection이 없어서 **`gh pr merge --au
 - 로컬 테스트 통과가 CI 통과를 뜻하지 않는다. 버전이나 환경 차이가 있으므로 CI를 watch한다.
 - 이미 머지된 뒤 CI 실패를 발견하면, revert보다 수정 커밋이 빠른 경우 fix-forward하고 그 수정의 CI도 watch한다.
 
+## 결정 기록 (Decision Docs)
+
+- 코드나 테스트를 고치기 전에 `python scripts/decisions.py find --path <파일>`로 그 파일을 지배하는 결정을 읽는다. 상세는 `decision-map` skill.
+- 동작이 바뀌면 `decision-docs/records.jsonl`도 같은 커밋에서 고친다. CI가 `check --strict-paths --strict-names`로 깨진 연결을 잡는다.
+- 개요: [`decision-docs/README.md`](decision-docs/README.md)
+
+## Skill 라우팅
+
+| 상황 | 실행할 skill |
+|---|---|
+| 기존 동작을 바꾸거나 새 기능을 시작하는데 정할 것이 남아 있다 | `decision-interview` → `verification-plan` → `delivery-plan` |
+| 코드·테스트를 고치기 직전 | `decision-map` |
+| 결정에 연결되지 않은 테스트를 정리 | `extract-test-decisions` |
+| 결정이 쌓여 문서로 정리할 때 | `promote-decisions` |
+| PR 생성, push, 배포 준비 (코드 변경 포함) | `code-review`를 먼저 실행하고 PASS일 때만 진행 |
+| 문서만 바뀐 변경 | `code-review` 생략 가능 |
+
 ## Claude 자산 추가 규칙
 
 `.claude/agents`, `.claude/skills`, `.claude/commands`에 새 자산을 만들기 전에 아래 순서로 판단한다.
