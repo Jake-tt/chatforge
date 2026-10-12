@@ -6,6 +6,19 @@ on:
   pull_request:
 
 jobs:
+  decisions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Decision tooling tests
+        run: pytest -q scripts
+      - name: Decision map points at real files and test cases
+        run: python scripts/decisions.py check --strict-paths --strict-names
+
   backend:
     runs-on: ubuntu-latest
     defaults:

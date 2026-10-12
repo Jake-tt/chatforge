@@ -1,0 +1,36 @@
+---
+title: "토큰 쿼터의 기준값은 DB, Redis는 캐시"
+description: "일일 토큰 사용량을 Postgres usage_daily에 트랜잭션으로 기록하고 Redis는 짧은 TTL 캐시와 서킷 브레이커 뒤에서만 쓴다. Redis INCR 카운터를 기준값으로 쓰는 방식과 요청마다 DB만 읽는 방식은 기각."
+status: accepted
+tags: [quota, redis, postgres, resilience]
+---
+
+# 토큰 쿼터의 기준값은 DB, Redis는 캐시
+
+## Context
+
+모든 채팅 요청은 스트림을 열기 전에 오늘 사용량을 확인하고, 답변이 끝나면 사용량을 더한다. 확인은 요청마다 일어나므로 빨라야 하고, 기록은 과금과 직결되므로 정확해야 한다. Redis는 운영 중 재시작되거나 연결이 끊길 수 있다.
+
+## Decision
+
+- 기준값은 Postgres `usage_daily(subject, day)`에 둔다. 어시스턴트 메시지 저장과 **같은 트랜잭션**에서 UPSERT하므로 메시지와 사용량이 어긋나지 않는다.
+- Redis는 오늘 합계를 cache-aside로 캐시한다. 쓰기 후에는 값을 증가시키지 않고 키를 무효화한다.
+- 무효화 직전에 읽은 오래된 값이 다시 캐시되는 경쟁이 남으므로 TTL을 5분으로 짧게 두어 오차의 지속 시간을 제한한다. 일일 한도는 soft limit이라 허용 가능하다.
+- Redis 호출은 `RedisGuard` 서킷 브레이커를 거친다. Redis가 죽으면 쿼터는 DB로 계속 강제하고, 분당 rate limit은 fail-open한다.
+
+**기각한 대안**
+
+- **Redis `INCRBY` 카운터를 기준값으로 사용**: 가장 빠르지만 Redis 재시작이나 장애 시 사용량이 사라지거나 메시지 저장과 어긋난다. 과금 데이터를 휘발성 저장소에만 둘 수 없다.
+- **캐시 없이 매 요청 DB 조회**: 정확하지만 모든 요청이 DB를 한 번 더 읽는다. 단일 행 PK 조회라 감당은 되지만, 캐시로 줄일 수 있는 부하다.
+- **쓰기 시 Redis 값 증가(write-through)**: 키가 만료된 상태에서 증가하면 오늘 이전 사용량이 빠진 값이 캐시된다. 무효화가 더 단순하고 안전하다.
+
+## Consequences
+
+- Redis 장애가 쿼터 우회로 이어지지 않는다. 대신 장애 중에는 요청마다 DB 조회가 늘어난다.
+- 캐시된 값은 최대 5분까지 실제보다 작을 수 있어, 한도 직전 사용자는 잠시 더 쓸 수 있다.
+- 서킷 브레이커 도입 전 로컬 측정에서 Redis 장애 시 첫 바이트 지연이 8.4초였고, 도입 후 0.27초가 됐다.
+
+## Related Decisions
+
+- DEC-BACKEND-QUOTA-SOT-001
+- DEC-BACKEND-REDIS-BREAKER-001
