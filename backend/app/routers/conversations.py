@@ -241,9 +241,13 @@ async def _stream_reply(
 
     assert completion is not None, "provider must finish with a Completion"
     usage = aux_usage + Usage(completion.input_tokens, completion.output_tokens)
-    message_id = await _persist_reply(
-        ctx, principal, conversation_id, "".join(parts), usage, citations
-    )
+    answer = "".join(parts)
+    if ctx.suggestions is not None and answer and completion.stop_reason != "refusal":
+        questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
+        usage += suggestion_usage
+        if questions:
+            yield _sse("suggestions", {"questions": questions})
+    message_id = await _persist_reply(ctx, principal, conversation_id, answer, usage, citations)
     if is_first_message:
         await ctx.tasks.enqueue("generate_title", {
             "conversation_id": str(conversation_id), "first_message": first_message,

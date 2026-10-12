@@ -8,6 +8,7 @@ interface Bubble {
   pending?: boolean;
   note?: string;
   citations?: Citation[] | null;
+  suggestions?: string[];
 }
 
 interface Props {
@@ -54,9 +55,8 @@ export default function ChatPanel(props: Props) {
   const updateLast = (fn: (b: Bubble) => Bubble) =>
     setBubbles((prev) => [...prev.slice(0, -1), fn(prev[prev.length - 1])]);
 
-  const send = async (e: FormEvent) => {
-    e.preventDefault();
-    const content = input.trim();
+  const send = async (text: string) => {
+    const content = text.trim();
     if (!content || streaming) return;
 
     setInput("");
@@ -75,9 +75,12 @@ export default function ChatPanel(props: Props) {
       const done = await api.sendMessage(
         conversationId,
         content,
-        (text) => updateLast((b) => ({ ...b, content: b.content + text })),
+        {
+          onDelta: (delta) => updateLast((b) => ({ ...b, content: b.content + delta })),
+          onSources: (citations) => updateLast((b) => ({ ...b, citations })),
+          onSuggestions: (suggestions) => updateLast((b) => ({ ...b, suggestions })),
+        },
         controller.signal,
-        (citations) => updateLast((b) => ({ ...b, citations })),
       );
       updateLast((b) => ({
         ...b,
@@ -120,7 +123,7 @@ export default function ChatPanel(props: Props) {
             )}
           </div>
         )}
-        {bubbles.map((b) => (
+        {bubbles.map((b, i) => (
           <div key={b.id} className={`bubble ${b.role}`}>
             {b.content || (b.pending ? <span className="typing">●●●</span> : null)}
             {b.note && <div className="note">{b.note}</div>}
@@ -132,6 +135,16 @@ export default function ChatPanel(props: Props) {
                   </li>
                 ))}
               </ol>
+            )}
+            {/* Only the latest answer offers follow-ups; older ones would be stale. */}
+            {i === bubbles.length - 1 && !streaming && b.suggestions && b.suggestions.length > 0 && (
+              <div className="suggestions">
+                {b.suggestions.map((q) => (
+                  <button key={q} type="button" className="chip" onClick={() => void send(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         ))}
@@ -149,7 +162,13 @@ export default function ChatPanel(props: Props) {
         </div>
       )}
 
-      <form className="composer" onSubmit={send}>
+      <form
+        className="composer"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          void send(input);
+        }}
+      >
         <textarea
           value={input}
           placeholder="메시지를 입력하세요 (Shift+Enter 줄바꿈)"

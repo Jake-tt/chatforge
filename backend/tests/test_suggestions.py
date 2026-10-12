@@ -1,0 +1,82 @@
+"""Follow-up question chips: validation of model output and graceful fallback."""
+
+import asyncio
+
+from app.services.llm import Completion, FakeProvider, LLMError, TextDelta
+from app.services.suggestions import FollowUps
+
+
+def test_validator_cleans_model_artefacts():
+    parsed = FollowUps.model_validate({"questions": [
+        "<ctrl46>프로 요금제는 얼마야?",   # tokenizer artefact
+        "  프로 요금제는 얼마야? ",          # duplicate after cleanup
+        '{"questions": ["x"]}',            # JSON echoed into a string
+        "",                                 # empty
+        "가" * 61,                          # too long for a chip
+        "한도는​ 언제 초기화돼?",       # zero-width space
+        42,                                 # wrong type
+        "가입하면 뭐가 좋아?",
+        "네 번째 질문",                      # over the limit of 3
+    ]})
+    assert parsed.questions == [
+        "프로 요금제는 얼마야?", "한도는 언제 초기화돼?", "가입하면 뭐가 좋아?",
+    ]
+
+
+def test_validator_tolerates_wrong_shape():
+    assert FollowUps.model_validate({"questions": "not a list"}).questions == []
+
+
+async def test_suggestions_are_streamed_before_done_and_charged(make_harness):
+    h = await make_harness(suggestions_enabled=True)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    result = await h.chat(headers, cid, "요금제 알려줘")
+
+    names = [e for e, _ in result.events]
+    assert names.index("suggestions") < names.index("done")
+    assert result.last("suggestions")["questions"] == ["더 자세히 설명해줘", "예시를 들어줄래?"]
+    done = result.last("done")
+    used = (await h.client.get("/usage", headers=headers)).json()["used"]
+    assert used == done["input_tokens"] + done["output_tokens"]
+
+
+class SlowSuggestions(FakeProvider):
+    async def structured(self, system, prompt, schema):
+        await asyncio.sleep(1)
+        return await super().structured(system, prompt, schema)
+
+
+class BrokenSuggestions(FakeProvider):
+    async def structured(self, system, prompt, schema):
+        raise LLMError("bad output", retryable=False)
+
+
+async def test_slow_or_failing_suggestions_never_break_the_reply(make_harness):
+    for llm in (SlowSuggestions(), BrokenSuggestions()):
+        h = await make_harness(llm=llm, suggestions_enabled=True,
+                               suggestions_timeout_seconds=0.05)
+        headers = await h.guest()
+        cid = await h.new_conversation(headers)
+
+        result = await h.chat(headers, cid, "요금제 알려줘")
+
+        assert result.last("done")["stop_reason"] == "end_turn"
+        assert "suggestions" not in [e for e, _ in result.events]
+
+
+class Refusing(FakeProvider):
+    async def stream(self, system, turns):
+        yield TextDelta("I can't help with that.")
+        yield Completion(5, 5, stop_reason="refusal")
+
+
+async def test_no_suggestions_after_a_refusal(make_harness):
+    h = await make_harness(llm=Refusing(), suggestions_enabled=True)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    result = await h.chat(headers, cid, "something disallowed")
+
+    assert "suggestions" not in [e for e, _ in result.events]

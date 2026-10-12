@@ -48,6 +48,12 @@ export interface StreamDone {
   stop_reason: string | null;
 }
 
+export interface StreamHandlers {
+  onDelta: (text: string) => void;
+  onSources?: (citations: Citation[]) => void;
+  onSuggestions?: (questions: string[]) => void;
+}
+
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
@@ -159,9 +165,8 @@ export const api = {
   async sendMessage(
     conversationId: string,
     content: string,
-    onDelta: (text: string) => void,
+    handlers: StreamHandlers,
     signal?: AbortSignal,
-    onSources?: (citations: Citation[]) => void,
   ): Promise<StreamDone> {
     const res = await authedFetch(`/conversations/${conversationId}/messages`, {
       method: "POST",
@@ -174,8 +179,12 @@ export const api = {
       const { value, done } = await reader.read();
       if (done) break;
       for (const { event, data } of parser.push(value)) {
-        if (event === "delta") onDelta((data as { text: string }).text);
-        else if (event === "sources") onSources?.((data as { citations: Citation[] }).citations);
+        if (event === "delta") handlers.onDelta((data as { text: string }).text);
+        else if (event === "sources") {
+          handlers.onSources?.((data as { citations: Citation[] }).citations);
+        } else if (event === "suggestions") {
+          handlers.onSuggestions?.((data as { questions: string[] }).questions);
+        }
         else if (event === "done") return data as StreamDone;
         else if (event === "error") {
           const err = data as { code: string; message: string };

@@ -17,6 +17,7 @@ from app.services.quota import QuotaService
 from app.services.rag import RagPipeline
 from app.services.redis_guard import RedisGuard
 from app.services.search import BM25Search, SearchProvider, load_markdown_corpus
+from app.services.suggestions import SuggestionService
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 
 
@@ -53,6 +54,8 @@ def create_app(
             quota=QuotaService(guard, settings.quota_timezone),
             history=HistoryCache(guard, settings.history_limit),
             rag=_build_rag(settings, provider, search),
+            suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
+            if settings.suggestions_enabled else None,
             tasks=queue,
         )
         try:

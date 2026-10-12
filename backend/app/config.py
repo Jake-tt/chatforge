@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 16000
     llm_aux_model: str = "claude-opus-5-5"  # router, summaries, titles
     history_limit: int = 20
+    system_prompt: str = "You are a concise, friendly assistant. Answer in the user's language."
 
     # RAG over the help-center knowledge base
     rag_enabled: bool = True
@@ -39,7 +40,10 @@ class Settings(BaseSettings):
     search_after_turns: int = 3  # from this many user turns on, search whenever a query exists
     grounding_char_budget: int = 1500  # longer source text is compressed
     summary_char_limit: int = 1000
-    system_prompt: str = "You are a concise, friendly assistant. Answer in the user's language."
+
+    # Follow-up question chips under each answer
+    suggestions_enabled: bool = True
+    suggestions_timeout_seconds: float = 6.0
 
     # Quotas — tokens per calendar day in `quota_timezone`
     quota_timezone: str = "Asia/Seoul"

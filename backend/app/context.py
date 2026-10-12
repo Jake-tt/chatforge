@@ -9,6 +9,7 @@ from app.services.llm import LLMProvider
 from app.services.quota import QuotaService
 from app.services.rag import RagPipeline
 from app.services.redis_guard import RedisGuard
+from app.services.suggestions import SuggestionService
 from app.services.tasks import TaskQueue
 
 
@@ -25,4 +26,5 @@ class AppContext:
     quota: QuotaService
     history: HistoryCache
     rag: RagPipeline | None
+    suggestions: SuggestionService | None
     tasks: TaskQueue
