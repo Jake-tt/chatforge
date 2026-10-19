@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 class ChatTurn:
     role: str  # "user" | "assistant"
     content: str
+    # Per-request material for this turn only (e.g. retrieved sources). Sent ahead of
+    # `content` but never stored, so replayed history stays byte-identical across requests.
+    context: str = ""
 
 
 @dataclass(frozen=True)
@@ -111,12 +114,33 @@ class LLMProvider(Protocol):
         ...
 
 
+_CACHE = {"type": "ephemeral"}
+
+
+def _cached_messages(turns: list[ChatTurn]) -> list[dict]:
+    """Render turns with a cache breakpoint on the last one the next request will repeat.
+
+    Caching is a prefix match, and the current turn is the one part that changes: its
+    `context` is never replayed. So the breakpoint goes on the turn before it. The next
+    request writes one turn further on and its lookback finds this entry, so each request
+    reads the whole conversation up to the previous reply from cache.
+    """
+    messages = []
+    for i, turn in enumerate(turns):
+        blocks = [{"type": "text", "text": turn.context}] if turn.context else []
+        blocks.append({"type": "text", "text": turn.content})
+        if i == len(turns) - 2:
+            blocks[-1]["cache_control"] = _CACHE
+        messages.append({"role": turn.role, "content": blocks})
+    return messages
+
+
 class AnthropicProvider:
     # "default" routes by refusal category, so no fallback model list to maintain.
     _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-    def __init__(self, settings: Settings):
-        self._client = anthropic.AsyncAnthropic()
+    def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None):
+        self._client = client or anthropic.AsyncAnthropic()
         self._model = settings.anthropic_model
         self._aux_model = settings.llm_aux_model  # router, summaries, titles
         self._effort = settings.llm_effort
@@ -127,8 +151,8 @@ class AnthropicProvider:
             async with self._client.beta.messages.stream(
                 model=self._model,
                 max_tokens=self._max_tokens,
-                system=system,
-                messages=[{"role": t.role, "content": t.content} for t in turns],
+                system=[{"type": "text", "text": system, "cache_control": _CACHE}],
+                messages=_cached_messages(turns),
                 output_config={"effort": self._effort},
                 betas=[self._FALLBACK_BETA],
                 fallbacks="default",
@@ -199,7 +223,8 @@ class FakeProvider:
             if self._delay:
                 await asyncio.sleep(self._delay)
             yield TextDelta(word if i == 0 else " " + word)
-        input_tokens = sum(len(t.content.split()) for t in turns) + len(system.split())
+        input_tokens = sum(len(f"{t.context} {t.content}".split()) for t in turns) \
+            + len(system.split())
         yield Completion(input_tokens, output_tokens=len(words), stop_reason="end_turn")
 
     async def complete(self, system: str, prompt: str) -> TextResult:

@@ -9,7 +9,8 @@ Per chat turn:
              it judged search unnecessary: follow-ups deep in a conversation often need
              facts the router underrates.
 3. Search  — retrieval with its own timeout.
-4. Ground  — sources are numbered and injected into the system prompt. If they exceed the
+4. Ground  — sources are numbered and sent with the current user turn (not the system
+             prompt, which must stay byte-stable for prompt caching). If they exceed the
              character budget they are compressed by the LLM, but the compression must keep
              the [n] citation markers; otherwise it is discarded and the raw sources are
              truncated instead, so a summary can never silently drop attribution.
@@ -47,8 +48,7 @@ SUMMARY_SYSTEM = (
     "Do not add anything that is not in the sources. Write in the language of the sources."
 )
 
-GROUNDING_TEMPLATE = """
-
+GROUNDING_TEMPLATE = """\
 Use the help-center sources below when they are relevant. Cite them inline by number, \
 like [1]. If they don't cover the question, say you don't know instead of guessing.
 
@@ -88,7 +88,7 @@ class Citation:
 @dataclass(frozen=True)
 class Grounding:
     citations: list[Citation]
-    context: str  # appended to the system prompt
+    context: str  # sent with the current user turn
     compressed: bool
 
 
