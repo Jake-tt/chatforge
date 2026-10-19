@@ -298,7 +298,7 @@ async def _persist_reply(
             seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
             message = Message(
                 conversation_id=conversation_id, seq=seq, role="assistant", content=text,
-                input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+                input_tokens=usage.prompt_tokens, output_tokens=usage.output_tokens,
                 citations=citations,
             )
             session.add(message)

@@ -67,6 +67,11 @@ class Usage:
                      self.cache_read_tokens + other.cache_read_tokens,
                      self.cache_write_tokens + other.cache_write_tokens)
 
+    @property
+    def prompt_tokens(self) -> int:
+        """Whole prompt size: the API's `input_tokens` excludes cached tokens."""
+        return self.input_tokens + self.cache_read_tokens + self.cache_write_tokens
+
     def billed(self, w: TokenWeights) -> int:
         """Charge in input-token equivalents, so quotas track cost rather than raw counts.
 
