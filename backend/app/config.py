@@ -2,8 +2,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.services.llm import TokenWeights
 
 _DEV_JWT_SECRET = "dev-only-secret-change-me-0123456789"
 
@@ -41,6 +43,15 @@ class Settings(BaseSettings):
     grounding_char_budget: int = 1500  # longer source text is compressed
     summary_char_limit: int = 1000
 
+    # Rolling summary of long conversations (background task)
+    summary_enabled: bool = True
+    summary_trigger_messages: int = 16  # keep below history_limit so nothing falls off
+    summary_trigger_tokens: int = 6000  # estimated, over the unsummarized messages
+    summary_keep_turns: int = Field(default=2, ge=1)  # latest user turns sent verbatim
+    summary_batch_messages: int = 40  # most messages folded per run; backlogs take several
+    conversation_summary_char_limit: int = 2000
+    summary_timeout_seconds: float = 30.0
+
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True
     suggestions_timeout_seconds: float = 6.0
@@ -50,6 +61,11 @@ class Settings(BaseSettings):
     guest_daily_tokens: int = 20_000
     free_daily_tokens: int = 200_000
     pro_daily_tokens: int = 2_000_000
+    # Quotas count input-token equivalents: each token kind is weighted by its price
+    # relative to an uncached input token (defaults: claude-opus-5-5 list prices).
+    token_weight_output: float = 5.0
+    token_weight_cache_read: float = 0.05
+    token_weight_cache_write: float = 1.25  # 5-minute TTL
     requests_per_minute: int = 20
     guest_creations_per_hour_per_ip: int = 10
 
@@ -72,6 +88,10 @@ class Settings(BaseSettings):
                 raise ValueError("cloudtasks backend needs GCP_PROJECT, TASKS_SERVICE_URL, "
                                  "TASKS_INVOKER_SA")
         return self
+
+    def token_weights(self) -> TokenWeights:
+        return TokenWeights(self.token_weight_output, self.token_weight_cache_read,
+                            self.token_weight_cache_write)
 
     def daily_token_limit(self, plan: str) -> int:
         return {
