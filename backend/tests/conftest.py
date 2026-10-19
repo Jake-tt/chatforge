@@ -32,6 +32,7 @@ def make_settings(database_url) -> Callable[..., Settings]:
         # RAG is off unless a test opts in, so chat tests keep exact token counts.
         overrides.setdefault("rag_enabled", False)
         overrides.setdefault("suggestions_enabled", False)
+        overrides.setdefault("summary_enabled", False)
         return Settings(env="test", database_url=database_url, _env_file=None, **overrides)
     return _make
 

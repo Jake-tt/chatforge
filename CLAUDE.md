@@ -40,6 +40,9 @@ AI 에이전트와 사람이 같은 기준으로 작업하기 위한 저장소 �
 - 사용량을 기록하는 코드는 과금 대상 데이터와 같은 트랜잭션에서 실행하고, 커밋 후 `quota.invalidate(...)`를 호출한다.
 - 백그라운드 작업은 `TaskQueue`를 거친다. 핸들러는 멱등해야 한다(at-least-once 전달).
 - 보조 LLM 호출(RAG 라우팅, 출처 압축, 추천 질문)은 타임아웃과 함께 실패해도 답변은 나가도록(fail soft) 만들고, 쓴 토큰은 사용자에게 과금한다.
+- system 프롬프트는 턴마다 바이트 단위로 같게 유지한다(프롬프트 캐싱). 요청마다 달라지는 내용은 `ChatTurn.context`로 현재 턴에 붙이고 저장하지 않는다.
+- 쿼터 과금은 `Usage.billed(settings.token_weights())`로 한다. 원시 토큰 합계를 과금하지 않는다.
+- 대화 요약은 `services.summary`가 소유한다. 경계는 user 메시지 직전에만 두고, 요약과 경계는 조건부 UPDATE 한 번으로 함께 바꾼다.
 - 모델 출력은 UI나 프롬프트에 들어가기 전에 검증한다(`suggestions.FollowUps`, `rag._keeps_citations` 참고). 구조화 출력은 형태만 보장하고 내용은 보장하지 않는다.
 - 메시지 순서는 `created_at`이 아니라 `seq`(`_allocate_seq`로 할당)로 정한다.
 - 에러는 `errors.ApiError(status, code, message)`로 낸다. 프론트엔드는 `code`로 분기한다.

@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     grounding_char_budget: int = 1500  # longer source text is compressed
     summary_char_limit: int = 1000
 
+    # Rolling summary of long conversations (background task)
+    summary_enabled: bool = True
+    summary_trigger_messages: int = 16  # keep below history_limit so nothing falls off
+    summary_trigger_tokens: int = 6000  # estimated, over the unsummarized messages
+    summary_keep_turns: int = 2  # latest user turns always sent verbatim
+    conversation_summary_char_limit: int = 2000
+    summary_timeout_seconds: float = 30.0
+
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True
     suggestions_timeout_seconds: float = 6.0
