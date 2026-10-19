@@ -78,6 +78,10 @@ class Conversation(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Incremented atomically per message; the new value becomes that message's `seq`.
     message_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Rolling summary of messages 1..summarized_through_seq. Written together in one UPDATE,
+    # so a reader always gets a summary and the boundary it covers as a pair.
+    summary: Mapped[str | None] = mapped_column(Text)
+    summarized_through_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", order_by="Message.seq"
