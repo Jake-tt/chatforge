@@ -134,7 +134,7 @@ GitHub 무료 플랜에서는 branch protection이 없어서 **`gh pr merge --au
 | 코드·테스트를 고치기 직전 | `decision-map` |
 | 결정에 연결되지 않은 테스트를 정리 | `extract-test-decisions` |
 | 결정이 쌓여 문서로 정리할 때 | `promote-decisions` |
-| PR 생성, push, 배포 준비 (코드 변경 포함) | `code-review`를 먼저 실행하고 PASS일 때만 진행 |
+| PR 생성, push, 배포 준비 (코드 변경 포함) | `code-review`를 먼저 실행하고 PASS일 때만 진행. **PR 단위로 한 번만 실행하고, 기능 조각이나 커밋마다 실행하지 않는다** |
 | 문서만 바뀐 변경 | `code-review` 생략 가능 |
 
 ## Claude 자산 추가 규칙

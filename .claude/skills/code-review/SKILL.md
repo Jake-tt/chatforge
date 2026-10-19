@@ -9,6 +9,10 @@ description: main 대비 변경 사항을 범위별 전문가 에이전트로 �
 
 `main` 대비 변경 사항을 리뷰하고, 발견한 문제를 고친 뒤 리포트를 출력한다.
 
+> **CRITICAL: PR 단위로 한 번만 실행한다.**
+> 기능 조각을 구현하거나 커밋할 때마다 실행하지 않는다. 브랜치의 작업을 모두 마치고 PR을 만들기(또는 push하기) 직전에 `main...HEAD` 전체를 대상으로 한 번 실행한다.
+> 다시 실행하는 경우는 두 가지뿐이다. 리뷰 후 사용자 확인을 거쳐 코드가 크게 바뀌었을 때, 그리고 PR에 새 기능 커밋이 추가됐을 때다. 이때도 리뷰 이후 바뀐 커밋만 대상으로 한다.
+
 ## Step 1: 변경 범위 파악
 
 ```bash
@@ -19,20 +23,34 @@ python scripts/decisions.py find --changed   # 변경 파일을 지배하는 결
 
 | 경로 패턴 | 범위 |
 |---|---|
-| `backend/app/**` | BACKEND |
+| `backend/app/**` 중 DATABASE·LLM 범위가 아닌 파일 | BACKEND |
 | `backend/migrations/**`, `backend/app/models.py` | DATABASE |
-| `backend/app/services/{llm,rag,search,suggestions}.py`, `backend/knowledge/**` | LLM |
+| `backend/app/services/{llm,rag,search,suggestions,summary}.py`, `backend/knowledge/**` | LLM |
 | `frontend/src/**` | FRONTEND |
 | `decision-docs/**`, `scripts/decisions.py` | DECISIONS |
 | `.github/**`, `deploy/**`, `**/Dockerfile`, `docker-compose.yml` | INFRA |
 
-diff가 50줄 미만이면 Step 2의 상시 전문가만 실행하고 조건부 전문가는 건너뛴다.
+**제품 코드 diff**: 아래를 뺀 추가·삭제 줄 수. 테스트(`backend/tests/**`, `**/*.test.ts`), 문서(`*.md`), `decision-docs/records.jsonl`.
+
+```bash
+git diff --numstat main...HEAD -- . ':!backend/tests' ':!**/*.test.ts' ':!*.md' ':!decision-docs/records.jsonl'
+```
 
 ## Step 2: 전문가 에이전트 병렬 실행
 
-감지된 범위에 맞는 전문가 에이전트를 **병렬로** 실행한다. 각 에이전트에게 `git diff main...HEAD`, 변경 파일 내용, Step 1에서 찾은 관련 결정을 전달한다.
+에이전트는 아래 **호출 조건을 만족할 때만** 실행한다. 조건을 만족하는 전문가들은 **병렬로** 실행한다. 각 에이전트에게는 세 가지를 전달한다. 자기 범위 파일의 diff(전체 diff가 아님), 변경 파일 내용, Step 1에서 찾은 관련 결정이다.
 
-### 상시 실행 (diff 50줄 이상)
+### 에이전트 없이 끝내는 경우
+- 제품 코드 diff가 0줄이면(문서, 테스트, 결정 기록만 바뀐 경우) 에이전트를 실행하지 않는다. `ruff check .`와 `python scripts/decisions.py check --strict-paths --strict-names`만 실행하고 리포트를 낸다.
+- 린트나 타입 오류처럼 명령으로 판정할 수 있는 항목은 에이전트에게 맡기지 않는다.
+
+### 상시 전문가 (제품 코드 diff 50줄 이상일 때)
+
+| 전문가 | 추가 호출 조건 |
+|---|---|
+| Testing | 제품 코드의 분기, 엔드포인트, 응답 형식이 바뀌었을 때. 이름 변경이나 상수 이동만 있으면 건너뛴다. |
+| Maintainability | 제품 코드에서 추가된 줄이 50줄 이상일 때. 삭제 위주의 diff는 건너뛴다. |
+| Testability | `routers/**`나 `services/**`에 함수가 새로 생기거나 시그니처가 바뀌었을 때 |
 
 **Testing**
 - 바뀐 동작에 대응하는 테스트가 있는가. 새 엔드포인트나 분기에 테스트가 빠졌으면 보고한다.
@@ -40,8 +58,8 @@ diff가 50줄 미만이면 Step 2의 상시 전문가만 실행하고 조건부 
 - 외부 경계(LLM, Redis, 검색, Cloud Tasks, 시간)만 mock했는가.
 
 **Maintainability**
-- 중복, 과도한 복잡도, 불명확한 이름, 쓰이지 않는 import·변수·코드.
-- 함수 길이와 파일 크기.
+- **중복과 복잡도만 본다.** 같은 로직이 두 곳 이상에 반복되는지, 중첩이 깊거나 분기가 많아 읽기 어려운 함수가 있는지 확인한다.
+- 쓰이지 않는 import·변수, 포맷, 이름 규칙은 보지 않는다. ruff가 잡거나 리뷰 가치가 낮기 때문이다.
 
 **Testability (핫스팟 예방)**
 - 함수가 **순수 로직과 부수효과를 섞고 있는지** 본다. 라우터 핸들러 안에서 DB 쿼리, 비즈니스 규칙, 응답 포맷팅을 다 하면 서비스로 분리를 제안한다.
@@ -51,6 +69,8 @@ diff가 50줄 미만이면 Step 2의 상시 전문가만 실행하고 조건부 
 - 파일 300줄 초과는 보조 신호일 뿐이고, 최종 판정은 테스트 가능성으로 한다.
 
 ### 조건부 (범위 기반)
+
+Step 1의 범위에 해당하는 파일이 바뀌었고, **그 범위의 제품 코드 diff가 10줄 이상일 때만** 실행한다. 예외로, DATABASE 범위의 마이그레이션 파일과 BACKEND 범위의 인증·권한 코드(`deps.py`, `security.py`, `routers/auth.py`, `services/claim.py`)는 한 줄만 바뀌어도 실행한다. 위험 변경이기 때문이다.
 
 **BACKEND → Security & Architecture**
 - SQL은 SQLAlchemy 표현식이나 바인딩 파라미터로만 만든다. 문자열 포매팅으로 만든 `text()`는 CRITICAL.
@@ -97,7 +117,9 @@ diff가 50줄 미만이면 Step 2의 상시 전문가만 실행하고 조건부 
 
 ## Step 5: 검증과 리포트
 
-수정 후 다시 확인한다.
+> **CRITICAL: 재검증은 Step 4에서 코드를 수정한 경우에만 실행한다.**
+> 구현 단계에서 Verify-Then-Commit으로 린트와 테스트를 이미 통과했기 때문이다. 수정이 없었다면 아래 명령을 다시 돌리지 않고 바로 리포트를 낸다.
+> 수정했다면 **수정한 파일의 범위에 해당하는 명령만** 실행한다(예: 프론트를 고치지 않았으면 프론트 명령은 생략).
 
 ```bash
 cd backend && ruff check . && pytest -q
