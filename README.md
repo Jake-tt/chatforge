@@ -139,7 +139,7 @@ flowchart LR
 
 - Cloud Logging이 파싱하는 JSON 한 줄 로그를 씁니다. `severity`로 로그 레벨을, `logging.googleapis.com/trace`로 Cloud Trace를 연결합니다.
 - 요청마다 `request_id`를 부여하고, 이 값을 contextvars로 SSE 스트림과 백그라운드 작업 로그까지 전파합니다. 응답을 버퍼링하지 않는 순수 ASGI 미들웨어라서 스트리밍을 방해하지 않습니다.
-- RAG는 단계별 소요 시간(라우터, 검색)과 검색 결과 수를 구조화 필드로 남깁니다.
+- RAG는 라우터 소요 시간과, 검색 소스별 결과 수·소요 시간·실패 원인(`timeout`, 예외 이름)을 구조화 필드로 남깁니다. 실패한 소스는 traceback과 함께 경고 로그를 남깁니다.
 
 ## 로컬 실행
 

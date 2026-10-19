@@ -8,7 +8,8 @@ Per chat turn:
 2. Hybrid  — from the Nth user turn on, search whenever the router produced a query even if
              it judged search unnecessary: follow-ups deep in a conversation often need
              facts the router underrates.
-3. Search  — retrieval with its own timeout.
+3. Search  — the selected sources run concurrently via `retrieval.gather_sources`, each
+             with its own timeout; a failed source only loses its own results.
 4. Ground  — sources are numbered and sent with the current user turn (not the system
              prompt, which must stay byte-stable for prompt caching). If they exceed the
              character budget they are compressed by the LLM, but the compression must keep
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings
 from app.services.llm import ChatTurn, LLMProvider, Usage
+from app.services.retrieval import SourceSpec, gather_sources
 from app.services.search import SearchHit, SearchProvider
 
 log = logging.getLogger(__name__)
@@ -119,7 +121,10 @@ class RagPipeline:
             return GroundingResult(None, usage)
 
         query = decision.query.strip() or turns[-1].content
-        hits = await self._retrieve(query)
+        hits = await self._retrieve([
+            SourceSpec("help", lambda: self._search.search(query, self._s.search_top_k),
+                       self._s.search_timeout_seconds),
+        ])
         if not hits:
             return GroundingResult(None, usage)
 
@@ -151,19 +156,20 @@ class RagPipeline:
             log.warning("rag router failed; answering without search", exc_info=True)
         return RouteDecision(needs_search=False), Usage()
 
-    async def _retrieve(self, query: str) -> list[SearchHit]:
+    async def _retrieve(self, sources: list[SourceSpec]) -> list[SearchHit]:
         started = time.perf_counter()
-        try:
-            async with asyncio.timeout(self._s.search_timeout_seconds):
-                hits = await self._search.search(query, self._s.search_top_k)
-        except Exception:
-            log.warning("rag search failed; answering without sources", exc_info=True)
-            return []
-        log.info("rag search", extra={
-            "query": query, "hits": len(hits),
-            "search_ms": round((time.perf_counter() - started) * 1000),
+        results = await gather_sources(sources)
+        for r in results:
+            if r.exc is not None:
+                log.warning("rag source %s failed (%s); answering without it", r.name, r.error,
+                            exc_info=r.exc)
+        log.info("rag retrieve", extra={
+            "sources": {r.name: {"hits": len(r.hits), "ms": r.ms, "error": r.error}
+                        for r in results},
+            "retrieve_ms": round((time.perf_counter() - started) * 1000),
         })
-        return hits
+        # Every source that answered reaches the grounding, in source order.
+        return [hit for r in results for hit in r.hits]
 
     async def _compress(self, query: str, body: str, n_sources: int) -> tuple[str | None, Usage]:
         limit = self._s.summary_char_limit
