@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     search_top_k: int = 4
     router_timeout_seconds: float = 8.0
     search_timeout_seconds: float = 5.0
+    account_context_enabled: bool = True  # cite the user's plan/usage when the router asks
     search_after_turns: int = 3  # from this many user turns on, search whenever a query exists
     grounding_char_budget: int = 1500  # longer source text is compressed
     summary_char_limit: int = 1000

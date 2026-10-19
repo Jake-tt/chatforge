@@ -35,6 +35,7 @@ class SpyProvider(FakeProvider):
         super().__init__()
         self.systems: list[str] = []
         self.calls: list[list[ChatTurn]] = []
+        self.compress_prompts: list[str] = []
         self._summary = summary
         self._router_delay = router_delay
         self._router_error = router_error
@@ -57,6 +58,7 @@ class SpyProvider(FakeProvider):
         return [turns[-1].context for turns in self.calls]
 
     async def complete(self, system: str, prompt: str) -> TextResult:
+        self.compress_prompts.append(prompt)
         if self._summary is None:
             return await super().complete(system, prompt)
         return TextResult(self._summary, Usage(100, 20))

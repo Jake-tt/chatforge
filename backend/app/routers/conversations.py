@@ -27,6 +27,8 @@ from app.schemas import (
 from app.services import summary
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage
+from app.services.rag import account_snapshot
+from app.services.search import SearchHit
 
 log = logging.getLogger(__name__)
 
@@ -154,9 +156,12 @@ async def send_message(
     turns = _to_turns([e for e in recent if e.seq > boundary])
     is_first_message = seq == 1 and conversation.title is None
     system = summary.system_prompt(settings, conversation)
+    # The quota just checked is the user's current usage; no need to read it again.
+    account = account_snapshot(principal.plan, quota) if settings.account_context_enabled \
+        else None
     return StreamingResponse(
         _stream_reply(ctx, principal, conversation.id, system, turns, body.content,
-                      is_first_message),
+                      is_first_message, account),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -200,6 +205,7 @@ async def _stream_reply(
     turns: list[ChatTurn],
     first_message: str,
     is_first_message: bool,
+    account: SearchHit | None,
 ) -> AsyncIterator[str]:
     parts: list[str] = []
     completion: Completion | None = None
@@ -216,7 +222,7 @@ async def _stream_reply(
         if ctx.rag is not None:
             # Flush headers now; routing and search take a moment before the first token.
             yield ": grounding\n\n"
-            result = await ctx.rag.ground(turns)
+            result = await ctx.rag.ground(turns, account=account)
             aux_usage = result.usage
             if result.grounding is not None:
                 # With the current turn, not the system prompt: see ChatTurn.context.
