@@ -4,15 +4,19 @@ Routes only depend on `LLMProvider`, so the real Anthropic client and the determ
 `FakeProvider` (local dev without an API key, and tests) are interchangeable.
 """
 
+from __future__ import annotations
+
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import anthropic
 from pydantic import BaseModel
 
-from app.config import Settings
+if TYPE_CHECKING:
+    from app.config import Settings  # config imports TokenWeights from here
 
 
 @dataclass(frozen=True)
@@ -28,26 +32,57 @@ class TextDelta:
 
 @dataclass(frozen=True)
 class Completion:
-    input_tokens: int
+    input_tokens: int  # uncached input only, as the API reports it
     output_tokens: int
     stop_reason: str | None
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 StreamEvent = TextDelta | Completion
 
 
 @dataclass(frozen=True)
+class TokenWeights:
+    """Price of each token kind relative to one uncached input token."""
+
+    output: float
+    cache_read: float
+    cache_write: float
+
+
+@dataclass(frozen=True)
 class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
-    @property
-    def total(self) -> int:
-        return self.input_tokens + self.output_tokens
-
-    def __add__(self, other: "Usage") -> "Usage":
+    def __add__(self, other: Usage) -> Usage:
         return Usage(self.input_tokens + other.input_tokens,
-                     self.output_tokens + other.output_tokens)
+                     self.output_tokens + other.output_tokens,
+                     self.cache_read_tokens + other.cache_read_tokens,
+                     self.cache_write_tokens + other.cache_write_tokens)
+
+    def billed(self, w: TokenWeights) -> int:
+        """Charge in input-token equivalents, so quotas track cost rather than raw counts.
+
+        Rounded up: a fully cached reply still costs at least one token.
+        """
+        return math.ceil(self.input_tokens + self.output_tokens * w.output
+                         + self.cache_read_tokens * w.cache_read
+                         + self.cache_write_tokens * w.cache_write)
+
+    @classmethod
+    def of(cls, completion: Completion) -> Usage:
+        return cls(completion.input_tokens, completion.output_tokens,
+                   completion.cache_read_tokens, completion.cache_write_tokens)
+
+
+def _usage_from_api(usage) -> Usage:
+    # Cache fields are absent (None) when the request had no cache breakpoint.
+    return Usage(usage.input_tokens, usage.output_tokens,
+                 usage.cache_read_input_tokens or 0, usage.cache_creation_input_tokens or 0)
 
 
 @dataclass(frozen=True)
@@ -105,10 +140,13 @@ class AnthropicProvider:
             raise LLMError(str(exc), retryable=True) from exc
         except anthropic.APIStatusError as exc:
             raise LLMError(str(exc), retryable=exc.status_code >= 500) from exc
+        usage = _usage_from_api(final.usage)
         yield Completion(
-            input_tokens=final.usage.input_tokens,
-            output_tokens=final.usage.output_tokens,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
             stop_reason=final.stop_reason,
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
         )
 
     async def complete(self, system: str, prompt: str) -> TextResult:
@@ -122,7 +160,7 @@ class AnthropicProvider:
             )
         except anthropic.APIError as exc:
             raise LLMError(str(exc), retryable=True) from exc
-        usage = Usage(response.usage.input_tokens, response.usage.output_tokens)
+        usage = _usage_from_api(response.usage)
         if response.stop_reason == "refusal":
             return TextResult("", usage)
         text = "".join(b.text for b in response.content if b.type == "text").strip()
@@ -145,8 +183,7 @@ class AnthropicProvider:
         if response.stop_reason == "refusal" or response.parsed_output is None:
             raise LLMError(f"no structured output (stop_reason={response.stop_reason})",
                            retryable=False)
-        return response.parsed_output, Usage(response.usage.input_tokens,
-                                             response.usage.output_tokens)
+        return response.parsed_output, _usage_from_api(response.usage)
 
 
 class FakeProvider:

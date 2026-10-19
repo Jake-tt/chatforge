@@ -8,7 +8,7 @@ async def _guest_with_chat(h) -> tuple[str, dict, str, int]:
     cid = await h.new_conversation(headers)
     result = await h.chat(headers, cid, "remember this")
     done = result.last("done")
-    return token, headers, cid, done["input_tokens"] + done["output_tokens"]
+    return token, headers, cid, done["billed_tokens"]
 
 
 async def test_signup_claims_guest_conversations_and_usage(h):

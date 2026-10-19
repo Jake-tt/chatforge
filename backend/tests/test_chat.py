@@ -29,7 +29,9 @@ async def test_stream_reply_is_persisted_and_charged(h):
         ("assistant", "(fake) You said: hello there"),
     ]
     usage = (await h.client.get("/usage", headers=headers)).json()
-    assert usage["used"] == done["input_tokens"] + done["output_tokens"]
+    # Output costs 5x input with the default weights.
+    assert done["billed_tokens"] == done["input_tokens"] + 5 * done["output_tokens"]
+    assert usage["used"] == done["billed_tokens"]
 
 
 async def test_first_message_triggers_background_title(h):

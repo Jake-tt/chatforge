@@ -77,7 +77,7 @@ async def test_knowledge_question_is_grounded_and_cited(make_harness):
     assert detail["messages"][-1]["citations"] == sources
     done = result.last("done")
     usage = (await h.client.get("/usage", headers=headers)).json()
-    assert usage["used"] == done["input_tokens"] + done["output_tokens"]
+    assert usage["used"] == done["billed_tokens"]
 
 
 async def test_small_talk_skips_search(make_harness):
