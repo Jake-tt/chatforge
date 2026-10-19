@@ -39,7 +39,7 @@ async def test_suggestions_are_streamed_before_done_and_charged(make_harness):
     assert result.last("suggestions")["questions"] == ["더 자세히 설명해줘", "예시를 들어줄래?"]
     done = result.last("done")
     used = (await h.client.get("/usage", headers=headers)).json()["used"]
-    assert used == done["input_tokens"] + done["output_tokens"]
+    assert used == done["billed_tokens"]
 
 
 class SlowSuggestions(FakeProvider):

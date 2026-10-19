@@ -124,7 +124,8 @@ async def send_message(
     """Store the user message, then stream the assistant reply as Server-Sent Events.
 
     Events: `delta` {text} … then `done` {message_id, input_tokens, output_tokens,
-    stop_reason} or `error` {code, message, retryable}.
+    cache_read_tokens, cache_write_tokens, billed_tokens, stop_reason} or `error`
+    {code, message, retryable}. `billed_tokens` is what the daily quota was charged.
     Quota/rate-limit failures are returned as plain HTTP 429 *before* the stream starts.
     """
     conversation = await _get_owned(session, principal, conversation_id)
@@ -240,7 +241,7 @@ async def _stream_reply(
         raise
 
     assert completion is not None, "provider must finish with a Completion"
-    usage = aux_usage + Usage(completion.input_tokens, completion.output_tokens)
+    usage = aux_usage + Usage.of(completion)
     answer = "".join(parts)
     if ctx.suggestions is not None and answer and completion.stop_reason != "refusal":
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
@@ -256,6 +257,9 @@ async def _stream_reply(
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "cache_write_tokens": usage.cache_write_tokens,
+        "billed_tokens": usage.billed(ctx.settings.token_weights()),
         "stop_reason": completion.stop_reason,
     })
 
@@ -273,7 +277,8 @@ async def _persist_reply(
     With no text (failed or cancelled before the first token) only the tokens already
     spent on routing/search are charged, and no empty message is stored.
     """
-    if not text and not usage.total:
+    billed = usage.billed(ctx.settings.token_weights())
+    if not text and not billed:
         return None
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
@@ -286,7 +291,7 @@ async def _persist_reply(
                 citations=citations,
             )
             session.add(message)
-        await ctx.quota.add_usage(session, principal.subject, usage.total)
+        await ctx.quota.add_usage(session, principal.subject, billed)
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
     if message is None:

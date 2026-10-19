@@ -5,6 +5,8 @@ from typing import Literal
 from pydantic import SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.services.llm import TokenWeights
+
 _DEV_JWT_SECRET = "dev-only-secret-change-me-0123456789"
 
 
@@ -50,6 +52,11 @@ class Settings(BaseSettings):
     guest_daily_tokens: int = 20_000
     free_daily_tokens: int = 200_000
     pro_daily_tokens: int = 2_000_000
+    # Quotas count input-token equivalents: each token kind is weighted by its price
+    # relative to an uncached input token (defaults: claude-opus-5-5 list prices).
+    token_weight_output: float = 5.0
+    token_weight_cache_read: float = 0.05
+    token_weight_cache_write: float = 1.25  # 5-minute TTL
     requests_per_minute: int = 20
     guest_creations_per_hour_per_ip: int = 10
 
@@ -72,6 +79,10 @@ class Settings(BaseSettings):
                 raise ValueError("cloudtasks backend needs GCP_PROJECT, TASKS_SERVICE_URL, "
                                  "TASKS_INVOKER_SA")
         return self
+
+    def token_weights(self) -> TokenWeights:
+        return TokenWeights(self.token_weight_output, self.token_weight_cache_read,
+                            self.token_weight_cache_write)
 
     def daily_token_limit(self, plan: str) -> int:
         return {
