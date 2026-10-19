@@ -2,7 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.services.llm import TokenWeights
@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     summary_enabled: bool = True
     summary_trigger_messages: int = 16  # keep below history_limit so nothing falls off
     summary_trigger_tokens: int = 6000  # estimated, over the unsummarized messages
-    summary_keep_turns: int = 2  # latest user turns always sent verbatim
+    summary_keep_turns: int = Field(default=2, ge=1)  # latest user turns sent verbatim
+    summary_batch_messages: int = 40  # most messages folded per run; backlogs take several
     conversation_summary_char_limit: int = 2000
     summary_timeout_seconds: float = 30.0
 

@@ -14,6 +14,9 @@ Rules:
   user's reply still has its question next to it.
 - Summary and boundary change in one UPDATE guarded by the boundary the task started from.
   Duplicate or overlapping deliveries (Cloud Tasks is at-least-once) apply one result.
+- One run folds at most `summary_batch_messages` of the oldest pending messages, so a long
+  backlog (e.g. a conversation older than this feature) catches up over several runs
+  instead of one prompt that never fits the timeout.
 - The summary is validated (non-empty, about the length limit). A failed or invalid summary
   leaves the conversation as it was: the full window is still sent.
 - Tokens are charged to the conversation's owner only for a summary that was applied.
@@ -110,6 +113,7 @@ async def summarize_conversation(ctx: AppContext, payload: dict) -> None:
             select(Message)
             .where(Message.conversation_id == conversation_id, Message.seq > start)
             .order_by(Message.seq)
+            .limit(settings.summary_batch_messages)
         ))
     folded = _cut(messages, settings.summary_keep_turns)
     if not folded:

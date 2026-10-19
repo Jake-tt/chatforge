@@ -168,7 +168,7 @@ Redis가 없어도 서버는 동작합니다. 위의 장애 대응 경로가 그
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 64개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 67개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 
