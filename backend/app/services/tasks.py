@@ -21,6 +21,7 @@ from sqlalchemy import update
 
 from app.config import Settings
 from app.models import Conversation
+from app.services import summary
 
 if TYPE_CHECKING:
     from app.context import AppContext
@@ -51,7 +52,10 @@ async def generate_title(ctx: AppContext, payload: dict) -> None:
         await session.commit()
 
 
-HANDLERS: dict[str, TaskHandler] = {"generate_title": generate_title}
+HANDLERS: dict[str, TaskHandler] = {
+    "generate_title": generate_title,
+    summary.TASK_NAME: summary.summarize_conversation,
+}
 
 
 class TaskQueue(Protocol):

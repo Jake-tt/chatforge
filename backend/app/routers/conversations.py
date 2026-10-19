@@ -24,6 +24,7 @@ from app.schemas import (
     ConversationOut,
     MessageCreate,
 )
+from app.services import summary
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage
 
@@ -149,10 +150,13 @@ async def send_message(
                              HistoryEntry(seq, "user", body.content))
 
     recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
+    boundary = summary.summarized_through(settings, conversation)
+    turns = _to_turns([e for e in recent if e.seq > boundary])
     is_first_message = seq == 1 and conversation.title is None
-    turns = _to_turns(recent)
+    system = summary.system_prompt(settings, conversation)
     return StreamingResponse(
-        _stream_reply(ctx, principal, conversation.id, turns, body.content, is_first_message),
+        _stream_reply(ctx, principal, conversation.id, system, turns, body.content,
+                      is_first_message),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -192,13 +196,13 @@ async def _stream_reply(
     ctx: AppContext,
     principal: Principal,
     conversation_id: uuid.UUID,
+    system: str,
     turns: list[ChatTurn],
     first_message: str,
     is_first_message: bool,
 ) -> AsyncIterator[str]:
     parts: list[str] = []
     completion: Completion | None = None
-    system = ctx.settings.system_prompt
     aux_usage = Usage()  # routing + source compression, charged with the answer
     citations: list[dict] | None = None
 
@@ -256,6 +260,10 @@ async def _stream_reply(
         await ctx.tasks.enqueue("generate_title", {
             "conversation_id": str(conversation_id), "first_message": first_message,
         })
+    if message_id is not None and summary.needs_summary(
+        ctx.settings, [*turns, ChatTurn("assistant", answer)]
+    ):
+        await ctx.tasks.enqueue(summary.TASK_NAME, {"conversation_id": str(conversation_id)})
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,
