@@ -32,6 +32,9 @@ async def test_output_and_cache_tokens_are_weighted(make_harness):
     assert done["billed_tokens"] == 100 + 50 + 50 + 250
     assert (done["cache_read_tokens"], done["cache_write_tokens"]) == (1000, 200)
     assert (await h.client.get("/usage", headers=headers)).json()["used"] == 450
+    # The stored message keeps the full prompt size, cached or not.
+    detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
+    assert detail["messages"][-1]["input_tokens"] == 100 + 1000 + 200
 
 
 async def test_fractional_charge_rounds_up(make_harness):
