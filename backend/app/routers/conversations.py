@@ -263,7 +263,13 @@ async def _stream_reply(
     if message_id is not None and summary.needs_summary(
         ctx.settings, [*turns, ChatTurn("assistant", answer)]
     ):
-        await ctx.tasks.enqueue(summary.TASK_NAME, {"conversation_id": str(conversation_id)})
+        try:
+            await ctx.tasks.enqueue(summary.TASK_NAME,
+                                    {"conversation_id": str(conversation_id)})
+        except Exception:
+            # Only an optimisation; the next turn enqueues it again. The reply is stored
+            # and charged, so the client must still get `done`.
+            log.warning("could not enqueue conversation summary", exc_info=True)
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,

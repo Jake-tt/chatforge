@@ -142,3 +142,48 @@ async def test_short_conversations_are_not_summarized(make_harness):
     await h.chat(headers, cid, "two")
 
     assert "summarize_conversation" not in [name for name, _ in queue.enqueued]
+
+
+class FailingQueue(RecordingQueue):
+    async def enqueue(self, name: str, payload: dict) -> None:
+        if name == "summarize_conversation":
+            raise ConnectionError("cloud tasks unavailable")
+        await super().enqueue(name, payload)
+
+
+async def test_failing_to_enqueue_the_summary_still_finishes_the_reply(make_harness):
+    h = await make_harness(llm=ScriptedProvider(), task_backend="cloudtasks",
+                           tasks=FailingQueue(), **SUMMARY_ON)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    for message in ("one", "two"):
+        await h.chat(headers, cid, message)
+    third = await h.chat(headers, cid, "three")  # this reply triggers the summary
+
+    assert third.last("done")["stop_reason"] == "end_turn"
+
+
+async def test_a_long_backlog_is_summarized_in_bounded_batches(make_harness):
+    # Conversations from before summaries existed start at boundary 0. One run must not
+    # try to fold all of them at once; later runs continue from the new boundary.
+    llm = ScriptedProvider()
+    h = await make_harness(llm=llm, summary_batch_messages=4, **SUMMARY_ON)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    await _chat_turns(h, headers, cid, "one", "two", "three")
+
+    assert "one" in llm.summary_prompts[0] and "two" not in llm.summary_prompts[0]
+    await _chat_turns(h, headers, cid, "four")
+    assert "two" in llm.summary_prompts[1] and "one" not in llm.summary_prompts[1]
+
+
+def test_keep_turns_must_be_positive():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, summary_keep_turns=0)
