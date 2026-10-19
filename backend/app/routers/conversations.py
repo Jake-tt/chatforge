@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -204,7 +205,7 @@ async def _stream_reply(
     def estimated_usage() -> Usage:
         # Aborted streams don't report final usage; charge an estimate so that
         # disconnecting mid-reply can't be used to dodge the quota.
-        prompt = system + "".join(t.content for t in turns)
+        prompt = system + "".join(t.context + t.content for t in turns)
         return aux_usage + Usage(_estimate_tokens(prompt), _estimate_tokens("".join(parts)))
 
     try:
@@ -214,7 +215,9 @@ async def _stream_reply(
             result = await ctx.rag.ground(turns)
             aux_usage = result.usage
             if result.grounding is not None:
-                system += result.grounding.context
+                # With the current turn, not the system prompt: see ChatTurn.context.
+                turns = [*turns[:-1], dataclasses.replace(turns[-1],
+                                                          context=result.grounding.context)]
                 citations = [c.as_dict() for c in result.grounding.citations]
                 yield _sse("sources", {"citations": citations})
 
