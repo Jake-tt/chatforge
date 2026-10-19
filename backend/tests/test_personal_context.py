@@ -88,3 +88,79 @@ async def test_account_context_can_be_switched_off(make_harness):
     result = await h.chat(headers, cid, ACCOUNT_QUESTION)
 
     assert "내 계정 현황" not in _titles(result)
+
+
+PAST_FACT = "부산 여행 숙소는 해운대 근처로 정했어"
+PAST_QUESTION = "지난번 부산 여행 숙소?"
+
+
+def _past(result) -> list[dict]:
+    sources = [d for e, d in result.events if e == "sources"]
+    return [c for c in (sources[-1]["citations"] if sources else [])
+            if c["title"].startswith("지난 대화 ›")]
+
+
+async def test_earlier_conversations_are_searched(make_harness):
+    h, llm, headers, earlier = await _harness(make_harness)
+    await h.chat(headers, earlier, PAST_FACT)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    hits = [c for c in _past(result) if "해운대" in c["snippet"]]
+    assert hits and {c["url"] for c in hits} == {f"/conversations/{earlier}"}
+    assert "해운대" in llm.contexts[-1]
+
+
+async def test_the_current_conversation_is_not_searched_as_past(make_harness):
+    # It is already in the history sent to the model.
+    h, _, headers, cid = await _harness(make_harness)
+    await h.chat(headers, cid, PAST_FACT)
+
+    result = await h.chat(headers, cid, PAST_QUESTION)
+
+    assert _past(result) == []
+
+
+async def test_other_owners_and_deleted_conversations_are_never_searched(make_harness):
+    h, _, alice, alice_cid = await _harness(make_harness)
+    await h.chat(alice, alice_cid, PAST_FACT)
+    bob = await h.guest()
+    bob_old = await h.new_conversation(bob)
+    await h.chat(bob, bob_old, PAST_FACT)
+    await h.client.delete(f"/conversations/{bob_old}", headers=bob)
+    bob_now = await h.new_conversation(bob)
+
+    result = await h.chat(bob, bob_now, PAST_QUESTION)
+
+    assert _past(result) == []
+
+
+async def test_past_search_survives_a_help_search_outage(make_harness):
+    h, _, headers, earlier = await _harness(make_harness, search=BrokenSearch())
+    await h.chat(headers, earlier, PAST_FACT)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    assert any("해운대" in c["snippet"] for c in _past(result))
+
+
+async def test_past_conversations_are_searched_only_when_the_router_asks(make_harness):
+    h, _, headers, earlier = await _harness(make_harness)
+    await h.chat(headers, earlier, PAST_FACT)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, "부산 여행 숙소?")
+
+    assert _past(result) == []
+
+
+async def test_past_search_can_be_switched_off(make_harness):
+    h, _, headers, earlier = await _harness(make_harness, past_search_enabled=False)
+    await h.chat(headers, earlier, PAST_FACT)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    assert _past(result) == []

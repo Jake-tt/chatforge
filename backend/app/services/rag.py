@@ -24,6 +24,7 @@ import asyncio
 import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
 
@@ -35,14 +36,17 @@ from app.services.quota import QuotaStatus
 from app.services.retrieval import SourceSpec, gather_sources
 from app.services.search import SearchHit, SearchProvider
 
+PastSearch = Callable[[str], Awaitable[list[SearchHit]]]
+
 log = logging.getLogger(__name__)
 
 ROUTER_SYSTEM = (
     "You route messages for the Chatforge help assistant. The knowledge base covers "
     "Chatforge plans and daily token limits, accounts and login, moving guest chats into an "
     "account, deleting conversations, privacy, and chat features. Decide whether answering "
-    "the latest user message needs that knowledge base, and separately whether it needs "
-    "this user's own plan or today's usage. Always fill `query` with a "
+    "the latest user message needs that knowledge base. Separately, decide whether it needs "
+    "this user's own plan or today's usage, and whether it refers to something from the "
+    "user's earlier, separate conversations. Always fill `query` with a "
     "standalone search query in the user's language that resolves references to earlier "
     "turns; leave it empty only for pure small talk."
 )
@@ -54,9 +58,9 @@ SUMMARY_SYSTEM = (
 )
 
 GROUNDING_TEMPLATE = """\
-Use the sources below when they are relevant: help-center articles, and facts about this \
-user's own account. Cite them inline by number, like [1]. If they don't cover the \
-question, say you don't know instead of guessing.
+Use the sources below when they are relevant: help-center articles, facts about this \
+user's own account, and excerpts from their earlier conversations. Cite them inline by \
+number, like [1]. If they don't cover the question, say you don't know instead of guessing.
 
 <sources>
 {body}
@@ -66,6 +70,7 @@ _FAKE_KEYWORDS = ("요금", "플랜", "한도", "토큰", "계정", "가입", "�
                   "plan", "limit", "account")
 # Whole words only: "내 " also occurs inside "안내 ".
 _FAKE_ACCOUNT_RE = re.compile(r"(?:^|\s)(?:내|my)\s|남은|remaining")
+_FAKE_PAST_RE = re.compile(r"지난번|저번|earlier|last time")
 _MARKER_RE = re.compile(r"\[(\d+)\]")
 _PLAN_LABELS = {"guest": "게스트", "free": "무료", "pro": "프로"}
 
@@ -76,6 +81,9 @@ class RouteDecision(BaseModel):
                        description="Standalone search query, or empty for small talk.")
     needs_account: bool = Field(
         default=False, description="True if the answer needs this user's plan or usage.")
+    needs_past: bool = Field(
+        default=False,
+        description="True if the user refers to something from an earlier conversation.")
 
     @classmethod
     def fake(cls, prompt: str) -> "RouteDecision":
@@ -84,7 +92,8 @@ class RouteDecision(BaseModel):
         lowered = latest.lower()
         needs = "?" in latest or any(k in lowered for k in _FAKE_KEYWORDS)
         return cls(needs_search=needs, query=latest[:200],
-                   needs_account=bool(_FAKE_ACCOUNT_RE.search(lowered)))
+                   needs_account=bool(_FAKE_ACCOUNT_RE.search(lowered)),
+                   needs_past=bool(_FAKE_PAST_RE.search(lowered)))
 
 
 @dataclass(frozen=True)
@@ -117,9 +126,10 @@ class RagPipeline:
         self._search = search
         self._s = settings
 
-    async def ground(self, turns: list[ChatTurn], account: SearchHit | None = None
-                     ) -> GroundingResult:
-        """`account`: the user's plan and usage, cited only when the router asks for it."""
+    async def ground(self, turns: list[ChatTurn], account: SearchHit | None = None,
+                     past: PastSearch | None = None) -> GroundingResult:
+        """`account`: the user's plan and usage. `past`: searches their earlier
+        conversations. Each is used only when the router asks for it."""
         usage = Usage()
         started = time.perf_counter()
         decision, route_usage = await self._route(turns)
@@ -128,17 +138,20 @@ class RagPipeline:
         hybrid = user_turns >= self._s.search_after_turns and bool(decision.query.strip())
         log.info("rag route", extra={
             "needs_search": decision.needs_search, "needs_account": decision.needs_account,
-            "hybrid": hybrid, "query": decision.query,
+            "needs_past": decision.needs_past, "hybrid": hybrid, "query": decision.query,
             "router_ms": round((time.perf_counter() - started) * 1000),
         })
         query = decision.query.strip() or turns[-1].content
         pinned = [account] if decision.needs_account and account is not None else []
-        searched: list[SearchHit] = []
+        sources: list[SourceSpec] = []
         if decision.needs_search or hybrid:
-            searched = await self._retrieve([
-                SourceSpec("help", lambda: self._search.search(query, self._s.search_top_k),
-                           self._s.search_timeout_seconds),
-            ])
+            sources.append(SourceSpec(
+                "help", lambda: self._search.search(query, self._s.search_top_k),
+                self._s.search_timeout_seconds))
+        if decision.needs_past and past is not None:
+            sources.append(SourceSpec("past", lambda: past(query),
+                                      self._s.search_timeout_seconds))
+        searched = await self._retrieve(sources) if sources else []
         if not (pinned or searched):
             return GroundingResult(None, usage)
 

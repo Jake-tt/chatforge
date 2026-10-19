@@ -27,7 +27,8 @@ from app.schemas import (
 from app.services import summary
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage
-from app.services.rag import account_snapshot
+from app.services.past_conversations import search_past_conversations
+from app.services.rag import PastSearch, account_snapshot
 from app.services.search import SearchHit
 
 log = logging.getLogger(__name__)
@@ -159,9 +160,11 @@ async def send_message(
     # The quota just checked is the user's current usage; no need to read it again.
     account = account_snapshot(principal.plan, quota) if settings.account_context_enabled \
         else None
+    past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
+        else None
     return StreamingResponse(
         _stream_reply(ctx, principal, conversation.id, system, turns, body.content,
-                      is_first_message, account),
+                      is_first_message, account, past),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -189,6 +192,19 @@ def _to_turns(entries: list[HistoryEntry]) -> list[ChatTurn]:
     return turns
 
 
+def _past_search(ctx: AppContext, principal: Principal,
+                 conversation_id: uuid.UUID) -> PastSearch:
+    async def search(query: str) -> list[SearchHit]:
+        # Own session: runs concurrently with the help search, after the request's closed.
+        async with ctx.sessionmaker() as session:
+            return await search_past_conversations(
+                session, _owned_by(principal), conversation_id, query,
+                conversations=ctx.settings.past_search_conversations,
+                limit=ctx.settings.past_search_top_k,
+            )
+    return search
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -206,6 +222,7 @@ async def _stream_reply(
     first_message: str,
     is_first_message: bool,
     account: SearchHit | None,
+    past: PastSearch | None,
 ) -> AsyncIterator[str]:
     parts: list[str] = []
     completion: Completion | None = None
@@ -222,7 +239,7 @@ async def _stream_reply(
         if ctx.rag is not None:
             # Flush headers now; routing and search take a moment before the first token.
             yield ": grounding\n\n"
-            result = await ctx.rag.ground(turns, account=account)
+            result = await ctx.rag.ground(turns, account=account, past=past)
             aux_usage = result.usage
             if result.grounding is not None:
                 # With the current turn, not the system prompt: see ChatTurn.context.
