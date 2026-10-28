@@ -1,0 +1,124 @@
+"""LangChain chat models for the agent graph.
+
+One factory picks the provider from settings, so the graph never depends on a vendor:
+- `ollama`: a local model (default Qwen3 8B) — free, runs on a 16GB Apple Silicon machine,
+  and supports native tool calling, which the ReAct main agent needs.
+- `anthropic`: Claude, keeping prompt caching and the weighted billing of cache tokens.
+- `fake`: a deterministic echo model for tests and local runs without a model server.
+
+Billing reads LangChain's standard `usage_metadata` and maps it onto `Usage`, whose
+`input_tokens` means *uncached* input (what the Anthropic API reports), so the same
+`Usage.billed()` weights apply whichever provider answered.
+"""
+
+from collections.abc import AsyncIterator, Iterator
+from typing import Any, Literal
+
+from langchain_anthropic import ChatAnthropic
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_ollama import ChatOllama
+
+from app.config import Settings
+from app.services.llm import AUX_EFFORT, AUX_MAX_TOKENS, Usage
+
+Purpose = Literal["main", "aux"]  # main: the answering agent; aux: router, summaries
+
+_CACHE_WRITE_TTL_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def usage_from_message(message: BaseMessage) -> Usage:
+    """Map LangChain `usage_metadata` (input_tokens = whole prompt) onto `Usage`."""
+    meta = getattr(message, "usage_metadata", None)
+    if not meta:
+        return Usage()
+    details = meta.get("input_token_details") or {}
+    cache_read = details.get("cache_read") or 0
+    # When the API splits cache writes by TTL, langchain-anthropic reports them under the
+    # TTL keys and sets `cache_creation` to 0; reading only `cache_creation` would bill
+    # cache writes as free.
+    by_ttl = sum(details.get(k) or 0 for k in _CACHE_WRITE_TTL_KEYS)
+    cache_write = by_ttl or details.get("cache_creation") or 0
+    return Usage(
+        input_tokens=max(meta.get("input_tokens", 0) - cache_read - cache_write, 0),
+        output_tokens=meta.get("output_tokens", 0),
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+    )
+
+
+def build_chat_model(settings: Settings, *, purpose: Purpose) -> BaseChatModel:
+    if settings.llm_provider == "ollama":
+        return ChatOllama(
+            model=settings.ollama_model,
+            base_url=settings.ollama_base_url,
+            num_ctx=settings.ollama_num_ctx,
+            # Qwen3 thinks by default and, with reasoning unset, writes <think> tags into
+            # the answer text. The agent needs plain answers and fast routing.
+            reasoning=False,
+            temperature=0,
+        )
+    if settings.llm_provider == "anthropic":
+        main = purpose == "main"
+        extra = {"api_key": settings.anthropic_api_key} if settings.anthropic_api_key else {}
+        return ChatAnthropic(
+            model=settings.anthropic_model if main else settings.llm_aux_model,
+            max_tokens=settings.llm_max_tokens if main else AUX_MAX_TOKENS,
+            output_config={"effort": settings.llm_effort if main else AUX_EFFORT},
+            **extra,
+        )
+    return EchoChatModel()
+
+
+class EchoChatModel(BaseChatModel):
+    """Echoes the last user message. Token counts are word counts so tests can assert."""
+
+    @property
+    def _llm_type(self) -> str:
+        return "echo"
+
+    @staticmethod
+    def _reply(messages: list[BaseMessage]) -> str:
+        last = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)
+        return f"(fake) You said: {last.content if last else ''}"
+
+    @staticmethod
+    def _usage(messages: list[BaseMessage], reply: str) -> dict:
+        input_tokens = sum(len(str(m.content).split()) for m in messages)
+        output_tokens = len(reply.split())
+        return {"input_tokens": input_tokens, "output_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens}
+
+    def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None,
+                  run_manager: CallbackManagerForLLMRun | None = None,
+                  **kwargs: Any) -> ChatResult:
+        reply = self._reply(messages)
+        message = AIMessage(reply, usage_metadata=self._usage(messages, reply))
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def _stream(self, messages: list[BaseMessage], stop: list[str] | None = None,
+                run_manager: CallbackManagerForLLMRun | None = None,
+                **kwargs: Any) -> Iterator[ChatGenerationChunk]:
+        yield from self._chunks(messages)
+
+    async def _astream(self, messages: list[BaseMessage], stop: list[str] | None = None,
+                       run_manager: AsyncCallbackManagerForLLMRun | None = None,
+                       **kwargs: Any) -> AsyncIterator[ChatGenerationChunk]:
+        for chunk in self._chunks(messages):
+            yield chunk
+
+    def _chunks(self, messages: list[BaseMessage]) -> Iterator[ChatGenerationChunk]:
+        reply = self._reply(messages)
+        words = reply.split(" ")
+        for i, word in enumerate(words):
+            last = i == len(words) - 1
+            yield ChatGenerationChunk(message=AIMessageChunk(
+                content=word if i == 0 else " " + word,
+                # Usage rides on the final chunk, as streaming providers report it.
+                usage_metadata=self._usage(messages, reply) if last else None,
+            ))
