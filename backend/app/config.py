@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     agent_max_tool_rounds: int = Field(default=3, ge=0, le=5)  # bounds cost per turn
     agent_max_tool_calls: int = Field(default=4, ge=1, le=8)  # per round
     agent_timeout_seconds: float = 60.0  # per agent model call
+    # Whole turn (router, lookups, every agent round). Below Cloud Run's request timeout,
+    # so a slow turn ends with an `error` event instead of a cut-off stream.
+    agent_turn_timeout_seconds: float = 240.0
 
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True

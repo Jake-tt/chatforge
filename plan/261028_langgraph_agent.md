@@ -27,8 +27,11 @@ chatforge의 대화 흐름이 고정 파이프라인(라우터 → 검색 → �
 
 1. **PR A — 모델 계층 추가** (완료, #4): LangChain 채팅 모델 팩토리(anthropic / ollama / fake)와 `usage_metadata` → `Usage` 변환. 기존 경로는 그대로
 2. **PR B — 에이전트 그래프 추가** (완료, #5): `backend/app/agent/`에 상태·노드·그래프. `AGENT_ENABLED` 플래그(기본 끔). HTTP 테스트에서 플래그를 켜고 fake 모델로 도구 호출 시나리오 검증
-3. **PR C — 호출부 전환** (진행 중): `send_message`가 에이전트 그래프를 쓰도록 전환. SSE 이벤트 계약(`delta`·`sources`·`suggestions`·`done`)과 과금은 그대로 유지
+3. **PR C — 호출부 전환** (리뷰 완료, 2026-10-28): `send_message`가 에이전트 그래프를 쓰도록 전환. SSE 이벤트 계약(`delta`·`sources`·`suggestions`·`done`)과 과금은 그대로 유지
 4. **PR D — 기존 경로 제거**: 고정 파이프라인 오케스트레이션(`RagPipeline.ground` 등)과 쓰이지 않게 된 코드 제거
+   - `_stream_reply`, `RagPipeline.ground`·`route`, `LLMProvider.stream`과 `AnthropicProvider.stream`(캐싱 테스트는 `to_messages(cache=True)`·ChatAnthropic 기준으로 이전), `FakeProvider.stream`, `AGENT_ENABLED` 플래그
+   - `_build_rag`가 항상 `RagPipeline`을 돌려주게 좁혀 `rag is None`과 `rag.search is None`의 이중 "없음"을 하나로
+   - `test_the_legacy_pipeline_still_answers_when_the_agent_is_off` 제거
 5. **PR E — PubMed 도구와 평가 파이프라인**: 데이터 확보 확인 후 별도 진행
 
 ## 위험 (Risk-First)

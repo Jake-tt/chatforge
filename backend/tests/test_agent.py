@@ -38,8 +38,9 @@ async def _agent_harness(make_harness, routes: list, agent: list, delay: float =
     # router's scripted replies.
     tasks = settings.pop("tasks", None) or RecordingQueue()
     h = await make_harness(llm=LangChainProvider(main=EchoChatModel(), aux=router),
-                           chat_model=agent_model, agent_enabled=True, rag_enabled=True,
-                           grounding_char_budget=100_000, tasks=tasks, **settings)
+                           chat_model=agent_model, agent_enabled=True,
+                           **{"rag_enabled": True, "grounding_char_budget": 100_000,
+                              **settings}, tasks=tasks)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
     return h, agent_model, headers, cid
@@ -413,3 +414,54 @@ async def test_every_route_decision_is_logged(make_harness, caplog):
 
     [record] = [r for r in caplog.records if r.message == "agent route"]
     assert record.routed and record.plan["help"] and record.plan["query"] == "토큰 한도"
+
+
+async def test_a_routed_help_search_without_a_help_center_is_skipped_cleanly(make_harness,
+                                                                           caplog):
+    # The router asks for help search, but there is no help center: nothing is fetched,
+    # and no source fails trying.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="토큰 한도")],
+        agent=[_answer("답")], rag_enabled=False)
+
+    with caplog.at_level("WARNING"):
+        result = await h.chat(headers, cid, "토큰 한도?")
+
+    assert result.text == "답"
+    assert "sources" not in [e for e, _ in result.events]
+    assert not [r for r in caplog.records if "rag source" in r.message]
+
+
+async def test_an_empty_knowledge_folder_leaves_out_help_search(make_harness, tmp_path):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[ConnectionError("router down")], agent=[_answer("답")],
+        knowledge_dir=str(tmp_path))
+
+    await h.chat(headers, cid, "안녕")
+
+    assert "search_help" not in [t["function"]["name"] for t in agent.calls[0]["tools"]]
+
+
+async def test_a_turn_that_runs_too_long_ends_with_an_error(make_harness):
+    # Each call is within its own timeout, but the turn as a whole is not.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()],
+        agent=[tool_call("search_help", "a", query="한도"), _answer("늦은 답")], delay=0.2,
+        agent_timeout_seconds=1.0, agent_turn_timeout_seconds=0.3)
+
+    result = await h.chat(headers, cid, "안녕")
+
+    assert result.last("error")["code"] == "llm_unavailable"
+    assert result.last("error")["retryable"] is True
+
+
+async def test_the_legacy_pipeline_still_answers_when_the_agent_is_off(make_harness):
+    # The rollback switch until the legacy pipeline is removed.
+    h = await make_harness(agent_enabled=False)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    result = await h.chat(headers, cid, "hello there")
+
+    assert result.text == "(fake) You said: hello there"
+    assert result.last("done")["stop_reason"] == "end_turn"

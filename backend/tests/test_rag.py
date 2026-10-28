@@ -3,6 +3,7 @@
 import asyncio
 from pathlib import Path
 
+from app.agent.graph import ROUTE_FAILED_NOTE, TOOLS_NOTE
 from app.config import Settings
 from app.services.llm import FakeProvider, LLMError, TextResult, Usage
 from app.services.search import BM25Search, load_markdown_corpus, tokenize
@@ -30,8 +31,8 @@ async def test_bm25_finds_the_right_help_section():
 class SpyProvider(FakeProvider):
     """FakeProvider for the aux calls (router, compression) plus a recording answer model.
 
-    What the answering agent was sent is read from `answers`; `systems` and `contexts`
-    keep the names the tests use.
+    What the answering agent was sent is read from `answers`; `contexts` is a shorthand
+    for its current turns.
     """
 
     def __init__(self, summary: str | None = None, router_delay: float = 0.0,
@@ -42,10 +43,6 @@ class SpyProvider(FakeProvider):
         self._summary = summary
         self._router_delay = router_delay
         self._router_error = router_error
-
-    @property
-    def systems(self) -> list[str]:
-        return self.answers.systems
 
     @property
     def contexts(self) -> list[str]:
@@ -100,10 +97,8 @@ async def test_sources_ride_on_the_current_turn_and_the_system_prompt_stays_froz
     await h.chat(headers, cid, "무료 요금제 하루 토큰 한도가 얼마야?")
     await h.chat(headers, cid, "비밀번호는 몇 자 이상이어야 해?")
 
-    first_system, second_system = llm.systems
-    assert first_system == second_system
-    assert first_system.startswith(h.ctx.settings.system_prompt)
-    assert "<sources>" not in first_system
+    # Exactly the base prompt plus the agent's tool note, identical on both turns.
+    assert llm.answers.systems == [h.ctx.settings.system_prompt + TOOLS_NOTE] * 2
     assert all("<sources>" in turn for turn in llm.contexts)
     # History is replayed as stored: earlier turns carry no sources.
     earlier = llm.answers.contents(1)[:-1]
@@ -130,7 +125,7 @@ async def test_router_timeout_hands_the_turn_to_the_agent(make_harness):
     assert result.response.status_code == 200
     assert result.text == "reply 1"
     assert "<sources>" not in llm.contexts[-1]
-    assert llm.answers.calls[-1]["tools"]
+    assert ROUTE_FAILED_NOTE in llm.contexts[-1]
 
 
 async def test_router_failure_answers_without_search(make_harness):

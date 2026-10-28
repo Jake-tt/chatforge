@@ -82,4 +82,5 @@ async def test_no_suggestions_after_a_refusal(make_harness):
 
     result = await h.chat(headers, cid, "something disallowed")
 
+    assert result.last("done")["stop_reason"] == "refusal"
     assert "suggestions" not in [e for e, _ in result.events]

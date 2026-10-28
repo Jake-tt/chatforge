@@ -4,6 +4,7 @@ import asyncio
 
 from langchain_core.messages import AIMessage
 
+from app.agent.graph import TOOLS_NOTE
 from app.routers.internal import verify_task_caller
 from app.services.llm import TextResult, Usage
 from tests.fakes import RecordingChatModel, usage
@@ -26,10 +27,6 @@ class ScriptedProvider:
         self.answers = RecordingChatModel(
             script=[AIMessage(r, usage_metadata=usage(1, 1)) for r in self._replies])
         self.summary_prompts: list[str] = []
-
-    @property
-    def systems(self) -> list[str]:
-        return self.answers.systems
 
     async def structured(self, system, prompt, schema):
         return schema.fake(prompt), Usage()
@@ -65,7 +62,7 @@ async def test_older_turns_are_replaced_by_the_summary(make_harness):
 
     assert "one" in llm.summary_prompts[0] and "reply 2" in llm.summary_prompts[0]
     assert "three" not in llm.summary_prompts[0]
-    assert "사용자는 부산 여행을 계획 중이다." in llm.systems[-1]
+    assert "사용자는 부산 여행을 계획 중이다." in llm.answers.systems[-1]
     assert llm.answers.turns() == [
         ("user", "three"), ("assistant", "reply 3"), ("user", "four"),
     ]
@@ -98,7 +95,7 @@ async def test_summarizer_failure_keeps_the_full_history(make_harness):
 
     await _chat_turns(h, headers, cid, "one", "two", "three", "four")
 
-    assert "<conversation_summary>" not in llm.systems[-1]
+    assert llm.answers.systems[-1] == h.ctx.settings.system_prompt + TOOLS_NOTE
     assert llm.answers.contents()[:2] == ["one", "reply 1"]
 
 
@@ -111,7 +108,8 @@ async def test_an_overlong_summary_is_discarded(make_harness):
 
     await _chat_turns(h, headers, cid, "one", "two", "three", "four")
 
-    assert llm.summary_prompts and "xxx" not in llm.systems[-1]
+    assert llm.summary_prompts
+    assert llm.answers.systems[-1] == h.ctx.settings.system_prompt + TOOLS_NOTE
     assert llm.answers.contents()[0] == "one"
 
 
