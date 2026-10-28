@@ -50,4 +50,8 @@ gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
   --set-env-vars "^@^ENV=prod@LOG_FORMAT=json@LLM_PROVIDER=anthropic@REDIS_URL=redis://${REDIS_HOST}:6379/0@CORS_ORIGINS=[\"${FRONTEND_ORIGIN}\"]@TASK_BACKEND=cloudtasks@GCP_PROJECT=${PROJECT_ID}@GCP_LOCATION=${REGION}@TASKS_QUEUE=${QUEUE}@TASKS_INVOKER_SA=${TASKS_SA}@TASKS_SERVICE_URL=${SERVICE_URL}"
 
 echo "API: $SERVICE_URL"
+# Rollback: traffic moves to the new revision at once. To go back, point it at the
+# previous one (list them with `gcloud run revisions list --service "$SERVICE"`):
+#   gcloud run services update-traffic "$SERVICE" --region "$REGION" --to-revisions <REVISION>=100
+# Schema migrations are expand-only between releases, so the previous revision still runs.
 echo "Frontend: VITE_API_URL=$SERVICE_URL npm --prefix frontend run build, then upload dist/"

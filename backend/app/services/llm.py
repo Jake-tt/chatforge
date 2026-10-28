@@ -112,6 +112,6 @@ def build_provider(settings: Settings) -> LLMProvider:
     if settings.llm_provider in ("ollama", "anthropic"):
         # Imported here: chat_models builds on the types in this module.
         from app.services.chat_models import LangChainProvider, build_chat_model
-        return LangChainProvider(build_chat_model(settings, purpose="main"),
-                                 build_chat_model(settings, purpose="aux"))
+        return LangChainProvider(build_chat_model(settings, purpose="aux"),
+                                 structured_method="json_schema")
     return FakeProvider()

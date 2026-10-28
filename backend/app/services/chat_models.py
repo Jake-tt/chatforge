@@ -152,11 +152,18 @@ _CACHE = {"type": "ephemeral"}
 
 def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
                 ) -> list[BaseMessage]:
-    """LangChain messages for a chat. With `cache`, mark the same prompt-cache breakpoints
-    as the direct Anthropic path: the system prompt and the last turn the next request will
-    repeat (the one before the current turn, whose `context` is never replayed)."""
+    """LangChain messages for a chat.
+
+    With `cache`, mark prompt-cache breakpoints on the system prompt and on the last turn
+    the next request will repeat (the one before the current turn, whose `context` is
+    never replayed). Every turn is then sent as content blocks, so a turn serializes the
+    same whether or not it carries this request's breakpoint: the cache matches a prefix
+    byte for byte."""
     def body(text: str, breakpoint: bool) -> str | list[dict]:
-        return [{"type": "text", "text": text, "cache_control": _CACHE}] if breakpoint else text
+        if not cache:
+            return text
+        block = {"type": "text", "text": text}
+        return [block | {"cache_control": _CACHE}] if breakpoint else [block]
 
     messages: list[BaseMessage] = [SystemMessage(body(system, cache))]
     for i, turn in enumerate(turns):
@@ -178,31 +185,56 @@ def stop_reason_of(message: BaseMessage | None) -> str:
 
 
 class LangChainProvider:
-    """`LLMProvider` on LangChain chat models, so the auxiliary calls (routing, source
+    """`LLMProvider` on a LangChain chat model, so the auxiliary calls (routing, source
     compression, suggestions, titles, summaries) run on any provider the factory supports,
-    including a local model."""
+    including a local model.
 
-    def __init__(self, main: BaseChatModel, aux: BaseChatModel):
-        self._main = main
+    `structured_method="json_schema"` asks the provider for a JSON-schema response format.
+    The default, tool calling, can't be forced on recent Claude models: a reply in plain
+    text then fails to parse. Test doubles that only implement tool calling leave it None.
+    """
+
+    def __init__(self, aux: BaseChatModel, structured_method: str | None = None):
         self._aux = aux
+        self.structured_method = structured_method
 
     async def complete(self, system: str, prompt: str) -> TextResult:
         try:
             message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(prompt)])
         except Exception as exc:
-            raise LLMError(str(exc), retryable=True) from exc
-        return TextResult(message.text.strip(), usage_from_message(message))
+            raise LLMError(str(exc), retryable=is_retryable(exc)) from exc
+        used = usage_from_message(message)
+        if stop_reason_of(message) == "refusal":
+            return TextResult("", used)  # a refused title or summary is no title or summary
+        return TextResult(message.text.strip(), used)
 
     async def structured[M: BaseModel](
         self, system: str, prompt: str, schema: type[M]
     ) -> tuple[M, Usage]:
-        runnable = self._aux.with_structured_output(schema, include_raw=True)
+        method = {"method": self.structured_method} if self.structured_method else {}
+        runnable = self._aux.with_structured_output(schema, include_raw=True, **method)
         try:
             out = await runnable.ainvoke([SystemMessage(system), HumanMessage(prompt)])
         except Exception as exc:
-            raise LLMError(str(exc), retryable=True) from exc
+            raise LLMError(str(exc), retryable=is_retryable(exc)) from exc
         if out["parsed"] is None:
             # The tokens were spent even though nothing parsed; let the caller bill them.
             raise LLMError(f"no structured output ({out.get('parsing_error')})",
                            retryable=False, usage=usage_from_message(out["raw"]))
         return out["parsed"], usage_from_message(out["raw"])
+
+
+_NOT_RETRYABLE = (TypeError, ValueError, KeyError, AttributeError, AssertionError)
+
+
+def is_retryable(exc: BaseException) -> bool:
+    """Whether retrying the same request can succeed.
+
+    API errors carry an HTTP status: only rate limits and server errors are worth a retry
+    (a 400 for an oversized prompt fails again). Network errors and timeouts may pass.
+    A bug in our own code won't.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int):
+        return status == 429 or status >= 500
+    return not isinstance(exc, _NOT_RETRYABLE)

@@ -6,7 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.services.chat_models import EchoChatModel, LangChainProvider, to_messages
+from app.services.chat_models import LangChainProvider, to_messages
 from app.services.llm import ChatTurn, LLMError, Usage, build_provider
 from tests.fakes import ScriptedChatModel, structured, usage
 
@@ -24,7 +24,7 @@ def test_turn_context_is_sent_ahead_of_the_question_but_kept_out_of_history():
 
 async def test_complete_returns_text_and_usage_from_the_aux_model():
     aux = ScriptedChatModel(script=[AIMessage("a short title", usage_metadata=usage(30, 3))])
-    provider = LangChainProvider(main=EchoChatModel(), aux=aux)
+    provider = LangChainProvider(aux)
 
     result = await provider.complete("title it", "plan a trip")
 
@@ -38,7 +38,7 @@ class Decision(BaseModel):
 
 async def test_structured_output_is_parsed_and_charged():
     aux = ScriptedChatModel(script=[structured(needs_search=True, query="토큰 한도")])
-    provider = LangChainProvider(main=EchoChatModel(), aux=aux)
+    provider = LangChainProvider(aux)
 
     decision, used = await provider.structured("route", "한도?", Decision)
 
@@ -48,7 +48,7 @@ async def test_structured_output_is_parsed_and_charged():
 
 async def test_unparseable_structured_output_raises_llm_error():
     aux = ScriptedChatModel(script=[AIMessage("not a tool call", usage_metadata=usage(5, 5))])
-    provider = LangChainProvider(main=EchoChatModel(), aux=aux)
+    provider = LangChainProvider(aux)
 
     with pytest.raises(LLMError):
         await provider.structured("route", "한도?", Decision)

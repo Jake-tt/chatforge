@@ -267,7 +267,7 @@ LLM_PROVIDER=ollama uvicorn app.main:create_app --factory --reload
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 138개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 146개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 
@@ -293,6 +293,8 @@ PROJECT_ID=... FRONTEND_ORIGIN=https://... ./deploy/deploy.sh      # 빌드 → 
 ```
 
 비밀값은 저장소나 환경변수 파일에 두지 않고 Secret Manager에서 주입합니다.
+
+배포하면 트래픽이 곧바로 새 리비전으로 넘어갑니다. 되돌릴 때는 `gcloud run services update-traffic <SERVICE> --to-revisions <이전 리비전>=100`으로 이전 리비전을 가리킵니다. 마이그레이션은 릴리스 사이에 expand만 하므로 이전 리비전도 그대로 동작합니다.
 
 ## 디렉터리 구조
 
@@ -321,6 +323,7 @@ deploy/                # GCP 셋업·배포 스크립트
 - Access token만 있고 refresh token과 토큰 폐기(revocation)는 없습니다.
 - 쿼터는 요청 전에 검사하는 soft limit이라 마지막 한 요청은 한도를 넘을 수 있습니다. 에이전트는 한 턴에 모델을 여러 번 부르므로(라우터와 도구 라운드) 넘는 폭이 더 클 수 있습니다. 상한은 라운드 수, 라운드당 도구 호출 수, 호출·턴 타임아웃으로 묶여 있습니다. 엄격하게 하려면 `max_tokens` 기준으로 예약했다가 정산하는 방식이 필요합니다.
 - 답변의 `[n]` 인용이 실제로 있는 출처 번호인지는 아직 검증하지 않습니다.
+- Claude가 답변 도중 거절하고 서버측 fallback 모델이 이어 답하면, 거절 전까지 스트리밍된 텍스트 뒤에 fallback 답이 경계 없이 붙습니다(LangChain 스트림이 fallback 블록을 구분하지 않음).
 - 클라이언트 연결이 끊긴 응답의 토큰은 문자 수 기반으로 추정합니다.
 
 ## AI 코딩 도구 활용

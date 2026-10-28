@@ -28,6 +28,7 @@ from app.schemas import (
     MessageCreate,
 )
 from app.services import summary
+from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
@@ -303,15 +304,10 @@ def _agent_context(job: ReplyJob) -> AgentContext:
     )
 
 
-_NOT_RETRYABLE = (TypeError, ValueError, KeyError, AttributeError, AssertionError)
-
-
 def _as_llm_error(exc: Exception) -> LLMError:
-    """Model and network failures may succeed on retry; a bug in our code won't."""
     if isinstance(exc, LLMError):
         return exc
-    return LLMError(str(exc) or type(exc).__name__,
-                    retryable=not isinstance(exc, _NOT_RETRYABLE))
+    return LLMError(str(exc) or type(exc).__name__, retryable=is_retryable(exc))
 
 
 async def _fail_reply(job: ReplyJob, partial: str, usage: Usage, citations: list[dict] | None,

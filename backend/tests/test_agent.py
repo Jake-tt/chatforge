@@ -8,12 +8,13 @@ past-conversation search, quota, persistence) is real and driven over HTTP.
 import asyncio
 import uuid
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.stream import FALLBACK_ANSWER
 from app.deps import Principal
 from app.routers.conversations import ReplyJob, _stream_agent_reply
-from app.services.chat_models import EchoChatModel, LangChainProvider
+from app.services.chat_models import LangChainProvider
 from app.services.llm import ChatTurn
 from app.services.search import SearchHit
 from tests.fakes import ScriptedChatModel, structured, tool_call, usage
@@ -37,7 +38,7 @@ async def _agent_harness(make_harness, routes: list, agent: list, delay: float =
     # Background tasks are recorded, not run: an inline title task would consume the
     # router's scripted replies.
     tasks = settings.pop("tasks", None) or RecordingQueue()
-    h = await make_harness(llm=LangChainProvider(main=EchoChatModel(), aux=router),
+    h = await make_harness(llm=LangChainProvider(router),
                            chat_model=agent_model,
                            **{"rag_enabled": True, "grounding_char_budget": 100_000,
                               **settings}, tasks=tasks)
@@ -375,7 +376,7 @@ async def test_only_available_tools_are_offered(make_harness):
 async def test_without_a_help_center_the_agent_runs_without_help_search(make_harness):
     agent = ScriptedChatModel(script=[_answer("답")])
     h = await make_harness(llm=LangChainProvider(
-        main=EchoChatModel(), aux=ScriptedChatModel(script=[ConnectionError("router down")])),
+        ScriptedChatModel(script=[ConnectionError("router down")])),
         chat_model=agent, rag_enabled=False, tasks=RecordingQueue())
     headers = await h.guest()
     cid = await h.new_conversation(headers)
@@ -453,3 +454,23 @@ async def test_a_turn_that_runs_too_long_ends_with_an_error(make_harness):
 
     assert result.last("error")["code"] == "llm_unavailable"
     assert result.last("error")["retryable"] is True
+
+
+class StatusError(Exception):
+    """Shaped like the SDK's API errors: an HTTP status on the exception."""
+
+    def __init__(self, status_code: int):
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize("status, retryable", [(400, False), (401, False), (429, True),
+                                               (529, True)])
+async def test_api_errors_are_retryable_only_when_a_retry_can_succeed(make_harness, status,
+                                                                      retryable):
+    h, agent, headers, cid = await _agent_harness(make_harness, routes=[_route()],
+                                                  agent=[StatusError(status)])
+
+    result = await h.chat(headers, cid, "안녕")
+
+    assert result.last("error")["retryable"] is retryable
