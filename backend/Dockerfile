@@ -21,5 +21,7 @@ USER appuser
 
 # Cloud Run injects $PORT. Migrations run as a separate Cloud Run Job, not on boot,
 # so scaling out never races schema changes.
+# No proxy headers: uvicorn trusting "*" takes the leftmost X-Forwarded-For entry, which the
+# client writes. The app reads the client IP itself (TRUSTED_PROXY_HOPS, deps.client_ip).
 CMD exec uvicorn app.main:create_app --factory --host 0.0.0.0 --port ${PORT:-8000} \
-    --proxy-headers --forwarded-allow-ips="*"
+    --no-proxy-headers

@@ -47,7 +47,7 @@ gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
   --cpu 1 --memory 512Mi --concurrency 80 --min-instances 0 --max-instances 10 \
   --timeout 300 \
   --set-secrets DATABASE_URL=DATABASE_URL:latest,JWT_SECRET=JWT_SECRET:latest,ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest \
-  --set-env-vars "^@^ENV=prod@LOG_FORMAT=json@LLM_PROVIDER=anthropic@REDIS_URL=redis://${REDIS_HOST}:6379/0@CORS_ORIGINS=[\"${FRONTEND_ORIGIN}\"]@TASK_BACKEND=cloudtasks@GCP_PROJECT=${PROJECT_ID}@GCP_LOCATION=${REGION}@TASKS_QUEUE=${QUEUE}@TASKS_INVOKER_SA=${TASKS_SA}@TASKS_SERVICE_URL=${SERVICE_URL}"
+  --set-env-vars "^@^ENV=prod@LOG_FORMAT=json@LLM_PROVIDER=anthropic@REDIS_URL=redis://${REDIS_HOST}:6379/0@CORS_ORIGINS=[\"${FRONTEND_ORIGIN}\"]@TASK_BACKEND=cloudtasks@GCP_PROJECT=${PROJECT_ID}@GCP_LOCATION=${REGION}@TASKS_QUEUE=${QUEUE}@TASKS_INVOKER_SA=${TASKS_SA}@TASKS_SERVICE_URL=${SERVICE_URL}@TRUSTED_PROXY_HOPS=1"
 
 echo "API: $SERVICE_URL"
 # Rollback: traffic moves to the new revision at once. To go back, point it at the

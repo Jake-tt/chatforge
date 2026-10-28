@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     token_weight_cache_write: float = 1.25  # 5-minute TTL
     requests_per_minute: int = 20
     guest_creations_per_hour_per_ip: int = 10
+    signups_per_hour_per_ip: int = 5
+    logins_per_15min_per_ip: int = 30  # password spraying across many emails
+    login_failures_per_15min_per_email: int = 5  # guessing one account's password
+    # Proxies in front of the app that append to X-Forwarded-For (Cloud Run: 1). The
+    # client IP is the entry the outermost one appended; entries left of it are forgeable.
+    trusted_proxy_hops: int = Field(default=0, ge=0)
 
     # Async jobs
     task_backend: Literal["inline", "cloudtasks"] = "inline"
@@ -112,6 +118,9 @@ class Settings(BaseSettings):
                 host in self.ollama_base_url for host in ("localhost", "127.0.0.1")
             ):
                 raise ValueError("LLM_PROVIDER=ollama needs a reachable OLLAMA_BASE_URL in prod")
+            # Behind Cloud Run a silent 0 would put every client in one rate-limit bucket.
+            if "trusted_proxy_hops" not in self.model_fields_set:
+                raise ValueError("TRUSTED_PROXY_HOPS must be set in prod")
         return self
 
     def token_weights(self) -> TokenWeights:
