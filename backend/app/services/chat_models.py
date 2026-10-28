@@ -46,6 +46,7 @@ from app.services.llm import (
 
 Purpose = Literal["main", "aux"]  # main: the answering agent; aux: router, summaries
 
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 _CACHE_WRITE_TTL_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
 
 
@@ -83,6 +84,10 @@ def build_chat_model(settings: Settings, *, purpose: Purpose) -> BaseChatModel:
     if settings.llm_provider == "anthropic":
         main = purpose == "main"
         extra = {"api_key": settings.anthropic_api_key} if settings.anthropic_api_key else {}
+        if main:
+            # Answers: a refused request is retried server-side on the model the refusal
+            # category calls for ("default"), so there is no fallback list to maintain.
+            extra |= {"betas": [_FALLBACK_BETA], "model_kwargs": {"fallbacks": "default"}}
         return ChatAnthropic(
             model=settings.anthropic_model if main else settings.llm_aux_model,
             max_tokens=settings.llm_max_tokens if main else AUX_MAX_TOKENS,
