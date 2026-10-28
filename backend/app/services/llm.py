@@ -105,9 +105,10 @@ class TextResult:
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, retryable: bool):
+    def __init__(self, message: str, retryable: bool, usage: Usage | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.usage = usage or Usage()  # tokens spent before the failure, still billable
 
 
 class LLMProvider(Protocol):

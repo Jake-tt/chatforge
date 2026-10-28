@@ -6,10 +6,16 @@ past-conversation search, quota, persistence) is real and driven over HTTP.
 """
 
 import asyncio
+import uuid
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.agent.stream import FALLBACK_ANSWER
+from app.deps import Principal
+from app.routers.conversations import ReplyJob, _stream_agent_reply
 from app.services.chat_models import EchoChatModel, LangChainProvider
+from app.services.llm import ChatTurn
 from app.services.search import SearchHit
 from tests.fakes import ScriptedChatModel, structured, tool_call, usage
 from tests.test_internal_tasks import RecordingQueue
@@ -25,9 +31,10 @@ def _answer(text: str) -> AIMessage:
     return AIMessage(text, usage_metadata=usage(40, 10))
 
 
-async def _agent_harness(make_harness, routes: list, agent: list, **settings):
+async def _agent_harness(make_harness, routes: list, agent: list, delay: float = 0.0,
+                         **settings):
     router = ScriptedChatModel(script=routes)
-    agent_model = ScriptedChatModel(script=agent)
+    agent_model = ScriptedChatModel(script=agent, delay=delay)
     # Background tasks are recorded, not run: an inline title task would consume the
     # router's scripted replies.
     tasks = settings.pop("tasks", None) or RecordingQueue()
@@ -117,7 +124,9 @@ async def test_router_failure_hands_the_choice_of_tools_to_the_agent(make_harnes
     first = agent.calls[0]
     assert {t["function"]["name"] for t in first["tools"]} == {
         "search_help", "search_past_conversations", "get_account_usage"}
-    assert "could not be routed" in first["messages"][0].content
+    # Told on the current turn, so the cached system prompt is unchanged.
+    assert "could not be routed" in first["messages"][-1].content
+    assert "could not be routed" not in first["messages"][0].content
     assert _citations(result)[0]["title"] == "내 계정 현황"
 
 
@@ -209,3 +218,180 @@ async def test_a_tool_call_with_bad_arguments_gets_an_error_back_not_a_failed_tu
     assert result.text == "검색어 없이 답할게요."
     tool_result = agent.calls[1]["messages"][-1]
     assert isinstance(tool_result, ToolMessage) and tool_result.status == "error"
+
+
+async def test_a_preamble_before_a_tool_call_is_neither_streamed_nor_stored(make_harness):
+    preamble = AIMessage("찾아볼게요", tool_calls=[
+        {"name": "search_help", "args": {"query": "한도"}, "id": "p"}], usage_metadata=usage(10, 5))
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()], agent=[preamble, _answer("하루 20,000 토큰이에요 [1].")])
+
+    result = await h.chat(headers, cid, "게스트 한도는?")
+
+    assert result.text == "하루 20,000 토큰이에요 [1]."
+    detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
+    assert detail["messages"][-1]["content"] == "하루 20,000 토큰이에요 [1]."
+
+
+async def test_tool_calls_per_round_are_capped(make_harness):
+    many = AIMessage("", tool_calls=[
+        {"name": "search_help", "args": {"query": "한도"}, "id": f"c{i}"} for i in range(6)
+    ], usage_metadata=usage(10, 5))
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()], agent=[many, _answer("정리했어요.")],
+        agent_max_tool_calls=4)
+
+    await h.chat(headers, cid, "다 찾아줘")
+
+    results = [m for m in agent.calls[-1]["messages"] if isinstance(m, ToolMessage)]
+    assert [m.status for m in results] == ["success"] * 4 + ["error"] * 2
+    assert "at most 4" in results[-1].content
+
+
+async def test_tool_results_are_delimited_as_material_not_instructions(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()],
+        agent=[tool_call("search_help", query="한도"), _answer("답")])
+
+    await h.chat(headers, cid, "한도")
+
+    tool_result = agent.calls[-1]["messages"][-1]
+    assert tool_result.content.startswith("<sources>")
+    assert "not instructions" in tool_result.content
+
+
+async def test_a_hanging_model_times_out_as_a_retryable_error(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()], agent=[_answer("늦은 답")], delay=1.0,
+        agent_timeout_seconds=0.05)
+
+    result = await h.chat(headers, cid, "안녕")
+
+    assert result.last("error") == {"code": "llm_unavailable",
+                                    "message": "The model is unavailable, please retry",
+                                    "retryable": True}
+
+
+async def test_a_bug_is_reported_as_not_retryable(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()], agent=[ValueError("bad state")])
+
+    result = await h.chat(headers, cid, "안녕")
+
+    assert result.last("error")["retryable"] is False
+
+
+async def test_agent_requests_keep_the_prompt_cacheable_on_anthropic(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[ConnectionError("router down"), _route()],
+        agent=[_answer("첫 답"), _answer("둘째 답")],
+        llm_provider="anthropic", anthropic_api_key="test")
+
+    await h.chat(headers, cid, "첫 질문")
+    await h.chat(headers, cid, "둘째 질문")
+
+    first_system = agent.calls[0]["messages"][0].content
+    second_system = agent.calls[1]["messages"][0].content
+    # The router failed on turn 1 only; that note must not change the cached system prefix.
+    assert first_system == second_system
+    assert second_system[-1]["cache_control"] == {"type": "ephemeral"}
+    previous_turn = agent.calls[1]["messages"][-2].content
+    assert previous_turn[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_an_unparseable_route_is_still_billed(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[AIMessage("no tool call", usage_metadata=usage(20, 4))],
+        agent=[_answer("답변")])
+
+    done = (await h.chat(headers, cid, "안녕")).last("done")
+
+    assert (done["input_tokens"], done["output_tokens"]) == (60, 14)
+
+
+async def test_a_long_clarifying_question_is_trimmed_not_dropped(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_clarification=True, clarifying_question="가" * 300)],
+        agent=[])
+
+    result = await h.chat(headers, cid, "그거")
+
+    assert result.text == "가" * 200
+
+
+async def test_prefetched_and_tool_sources_are_numbered_continuously(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="일일 토큰 한도")],
+        agent=[tool_call("search_help", query="비밀번호 몇 자"), _answer("답 [1][5]")])
+
+    result = await h.chat(headers, cid, "토큰 한도와 비밀번호 규칙?")
+
+    numbers = [c["n"] for c in _citations(result)]
+    assert numbers == list(range(1, len(numbers) + 1))
+    tool_result = agent.calls[-1]["messages"][-1].content
+    prefetched = len([e for e in result.events if e[0] == "sources"][0][1]["citations"])
+    assert f"[{prefetched + 1}]" in tool_result
+
+
+async def test_a_prefetch_that_finds_nothing_adds_no_sources(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="zzqq xxyy")],
+        agent=[_answer("모르겠어요")])
+
+    result = await h.chat(headers, cid, "zzqq xxyy?")
+
+    assert "sources" not in [e for e, _ in result.events]
+    assert "<sources>" not in agent.calls[0]["messages"][-1].content
+
+
+async def test_an_empty_final_answer_is_replaced(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()], agent=[AIMessage("", usage_metadata=usage(5, 0))],
+        agent_max_tool_rounds=0)
+
+    result = await h.chat(headers, cid, "안녕")
+
+    assert result.text == FALLBACK_ANSWER
+
+
+async def test_the_answer_stop_reason_is_reported(make_harness):
+    cut = AIMessage("잘린 답", usage_metadata=usage(5, 5),
+                    response_metadata={"stop_reason": "max_tokens"})
+    h, agent, headers, cid = await _agent_harness(make_harness, routes=[_route()], agent=[cut])
+
+    assert (await h.chat(headers, cid, "길게")).last("done")["stop_reason"] == "max_tokens"
+
+
+async def test_only_available_tools_are_offered(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[ConnectionError("router down")], agent=[_answer("답")],
+        account_context_enabled=False, past_search_enabled=False)
+
+    await h.chat(headers, cid, "안녕")
+
+    assert [t["function"]["name"] for t in agent.calls[0]["tools"]] == ["search_help"]
+
+
+async def test_the_agent_needs_rag(make_harness):
+    with pytest.raises(ValueError, match="RAG_ENABLED"):
+        await make_harness(agent_enabled=True, rag_enabled=False)
+
+
+async def test_a_disconnect_keeps_what_the_client_saw_and_charges_for_it(make_harness):
+    long = "가" * 120 + " 끝"
+    h, agent, headers, cid = await _agent_harness(make_harness, routes=[_route()],
+                                                  agent=[_answer(long)])
+    me = (await h.client.get("/auth/me", headers=headers)).json()
+    principal = Principal("guest", uuid.UUID(me["id"]), "guest")
+    job = ReplyJob(h.ctx, principal, uuid.UUID(cid), h.ctx.settings.system_prompt,
+                   [ChatTurn("user", "질문")], "질문", False, None, None)
+
+    stream = _stream_agent_reply(job)
+    async for event in stream:
+        if event.startswith("event: delta"):
+            break
+    await stream.aclose()  # the client went away mid-answer
+
+    detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
+    assert detail["messages"][-1]["content"].startswith("가" * 120)
+    assert (await h.client.get("/usage", headers=headers)).json()["used"] > 0

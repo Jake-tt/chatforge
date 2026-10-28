@@ -10,12 +10,12 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessageChunk
 from sqlalchemy import ColumnElement, and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent.graph import AgentContext
+from app.agent.stream import AgentStream
 from app.agent.tools import build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
@@ -290,69 +290,67 @@ async def _stream_reply(job: ReplyJob) -> AsyncIterator[str]:
 async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
     """The same SSE contract as `_stream_reply`, produced by the LangGraph agent.
 
-    `messages` stream mode carries the answering agent's tokens (other nodes' model calls,
-    like the router's, are filtered out by node name); `updates` carries each node's
-    state delta: usage to charge, citations to show, the grounded turn, the final answer.
+    `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
+    events; this function only drives the graph, handles failure, and finishes the reply.
     """
     ctx = job.ctx
-    agent_ctx = AgentContext(
-        model=ctx.chat_model, rag=ctx.rag,
-        tools=build_tools(ctx.settings, ctx.rag, job.account, job.past),
-        system=job.system, account=job.account, past=job.past,
-        max_tool_rounds=ctx.settings.agent_max_tool_rounds,
-    )
-    parts: list[str] = []
-    usage = Usage()
-    citations: list[dict] = []
-    turns = job.turns
-    answer, clarified = "", False
-
+    stream = AgentStream(turns=job.turns)
     try:
         # Flush headers now; routing and lookups take a moment before the first token.
         yield ": routing\n\n"
         async for mode, payload in ctx.agent.astream(
             {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
              "usage": Usage()},
-            context=agent_ctx, stream_mode=["messages", "updates"],
+            context=_agent_context(job), stream_mode=["messages", "updates"],
         ):
             if mode == "messages":
-                chunk, meta = payload
-                if meta.get("langgraph_node") == "agent" and isinstance(chunk, AIMessageChunk) \
-                        and chunk.text:
-                    parts.append(chunk.text)
-                    yield _sse("delta", {"text": chunk.text})
-                continue
-            for update in payload.values():
-                if not update:
-                    continue
-                usage += update.get("usage") or Usage()
-                turns = update.get("turns", turns)
-                answer = update.get("answer", answer)
-                clarified = clarified or update.get("clarified", False)
-                if update.get("citations"):
-                    citations += update["citations"]
-                    yield _sse("sources", {"citations": citations})
+                events = stream.on_message(*payload)
+            else:
+                events = [e for update in payload.values() if update
+                          for e in stream.on_update(update)]
+            for name, data in events:
+                yield _sse(name, data)
     except (asyncio.CancelledError, GeneratorExit):
-        partial = "".join(parts)
+        partial = stream.partial
         await asyncio.shield(_persist_reply(
-            job, partial, _estimated_usage(job, turns, partial, usage), citations or None))
+            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            stream.citations or None))
         raise
     except Exception as exc:
-        # Any node's model or server failure ends the turn like a provider error.
-        error = exc if isinstance(exc, LLMError) else LLMError(str(exc), retryable=True)
-        partial = "".join(parts)
-        yield await _fail_reply(job, partial, _estimated_usage(job, turns, partial, usage),
-                                citations or None, error)
+        partial = stream.partial
+        yield await _fail_reply(
+            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            stream.citations or None, _as_llm_error(exc))
         return
 
-    text = "".join(parts)
-    if not text and answer:
-        # The clarify node answers without a model call, so nothing was streamed.
-        text = answer
-        yield _sse("delta", {"text": text})
-    async for event in _finish_reply(job, turns, text, usage, citations or None, "end_turn",
-                                     followups=not clarified, summarize=not clarified):
+    async for event in _finish_reply(
+        job, stream.turns, stream.text, stream.usage, stream.citations or None,
+        stream.stop_reason, followups=not stream.clarified, summarize=not stream.clarified,
+    ):
         yield event
+
+
+def _agent_context(job: ReplyJob) -> AgentContext:
+    ctx, s = job.ctx, job.ctx.settings
+    return AgentContext(
+        model=ctx.chat_model, rag=ctx.rag,
+        tools=build_tools(s, ctx.rag, job.account, job.past),
+        system=job.system, account=job.account, past=job.past,
+        max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
+        timeout_seconds=s.agent_timeout_seconds,
+        prompt_cache=s.llm_provider == "anthropic",
+    )
+
+
+_NOT_RETRYABLE = (TypeError, ValueError, KeyError, AttributeError, AssertionError)
+
+
+def _as_llm_error(exc: Exception) -> LLMError:
+    """Model and network failures may succeed on retry; a bug in our code won't."""
+    if isinstance(exc, LLMError):
+        return exc
+    return LLMError(str(exc) or type(exc).__name__,
+                    retryable=not isinstance(exc, _NOT_RETRYABLE))
 
 
 async def _fail_reply(job: ReplyJob, partial: str, usage: Usage, citations: list[dict] | None,
@@ -362,6 +360,12 @@ async def _fail_reply(job: ReplyJob, partial: str, usage: Usage, citations: list
     return _sse("error", {"code": "llm_unavailable",
                           "message": "The model is unavailable, please retry",
                           "retryable": exc.retryable})
+
+
+def _wants_followups(ctx: AppContext, answer: str, stop_reason: str | None,
+                     followups: bool) -> bool:
+    return followups and ctx.suggestions is not None and bool(answer) \
+        and stop_reason != "refusal"
 
 
 async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
@@ -374,7 +378,7 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
     for the user, and summarizing would fold the open question away.
     """
     ctx = job.ctx
-    if followups and ctx.suggestions is not None and answer and stop_reason != "refusal":
+    if _wants_followups(ctx, answer, stop_reason, followups):
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
         usage += suggestion_usage
         if questions:

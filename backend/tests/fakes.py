@@ -1,5 +1,6 @@
 """A scripted LangChain chat model for agent tests: the LLM is the external boundary."""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -23,6 +24,7 @@ class ScriptedChatModel(BaseChatModel):
 
     script: list[Any] = Field(default_factory=list)
     calls: list[dict] = Field(default_factory=list)
+    delay: float = 0.0  # seconds before each streamed reply (timeouts)
 
     @property
     def _llm_type(self) -> str:
@@ -46,6 +48,8 @@ class ScriptedChatModel(BaseChatModel):
 
     async def _astream(self, messages, stop=None, run_manager=None,
                        **kwargs) -> AsyncIterator[ChatGenerationChunk]:
+        if self.delay:
+            await asyncio.sleep(self.delay)
         message = self._next(messages, kwargs.get("tools") or [])
         words = message.text.split(" ") if message.text else []
         for i, word in enumerate(words):

@@ -145,19 +145,30 @@ class EchoChatModel(BaseChatModel):
             ))
 
 
-def to_messages(system: str, turns: list[ChatTurn]) -> list[BaseMessage]:
-    messages: list[BaseMessage] = [SystemMessage(system)]
-    for turn in turns:
+_CACHE = {"type": "ephemeral"}
+
+
+def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
+                ) -> list[BaseMessage]:
+    """LangChain messages for a chat. With `cache`, mark the same prompt-cache breakpoints
+    as the direct Anthropic path: the system prompt and the last turn the next request will
+    repeat (the one before the current turn, whose `context` is never replayed)."""
+    def body(text: str, breakpoint: bool) -> str | list[dict]:
+        return [{"type": "text", "text": text, "cache_control": _CACHE}] if breakpoint else text
+
+    messages: list[BaseMessage] = [SystemMessage(body(system, cache))]
+    for i, turn in enumerate(turns):
+        breakpoint = cache and i == len(turns) - 2
         if turn.role == "user":
             # Per-request context (sources) rides on the current turn only; see ChatTurn.
             text = f"{turn.context}\n\n{turn.content}" if turn.context else turn.content
-            messages.append(HumanMessage(text))
+            messages.append(HumanMessage(body(text, breakpoint)))
         else:
-            messages.append(AIMessage(turn.content))
+            messages.append(AIMessage(body(turn.content, breakpoint)))
     return messages
 
 
-def _stop_reason(message: BaseMessage | None) -> str:
+def stop_reason_of(message: BaseMessage | None) -> str:
     meta = message.response_metadata if message is not None else {}
     if meta.get("stop_reason"):
         return meta["stop_reason"]
@@ -183,7 +194,7 @@ class LangChainProvider:
         except Exception as exc:
             raise LLMError(str(exc), retryable=True) from exc
         used = usage_from_message(full) if full is not None else Usage()
-        yield Completion(used.input_tokens, used.output_tokens, _stop_reason(full),
+        yield Completion(used.input_tokens, used.output_tokens, stop_reason_of(full),
                          used.cache_read_tokens, used.cache_write_tokens)
 
     async def complete(self, system: str, prompt: str) -> TextResult:
@@ -202,6 +213,7 @@ class LangChainProvider:
         except Exception as exc:
             raise LLMError(str(exc), retryable=True) from exc
         if out["parsed"] is None:
+            # The tokens were spent even though nothing parsed; let the caller bill them.
             raise LLMError(f"no structured output ({out.get('parsing_error')})",
-                           retryable=False)
+                           retryable=False, usage=usage_from_message(out["raw"]))
         return out["parsed"], usage_from_message(out["raw"])

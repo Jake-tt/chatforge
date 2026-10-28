@@ -31,7 +31,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.config import Settings
-from app.services.llm import ChatTurn, LLMProvider, Usage
+from app.services.llm import ChatTurn, LLMError, LLMProvider, Usage
 from app.services.quota import QuotaStatus
 from app.services.retrieval import SourceSpec, gather_sources
 from app.services.search import SearchHit, SearchProvider
@@ -156,6 +156,9 @@ class RagPipeline:
                 return await self._llm.structured(system, router_prompt(turns), schema)
         except TimeoutError:
             log.warning("router timed out")
+        except LLMError as exc:
+            log.warning("router failed: %s", exc)
+            return None, exc.usage
         except Exception:
             log.warning("router failed", exc_info=True)
         return None, Usage()
