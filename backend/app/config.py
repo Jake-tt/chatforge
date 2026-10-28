@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     # Whole turn (router, lookups, every agent round). Below Cloud Run's request timeout,
     # so a slow turn ends with an `error` event instead of a cut-off stream.
     agent_turn_timeout_seconds: float = 240.0
+    # Turns streaming at once per user: bounds how far parallel turns can pass the quota
+    max_concurrent_streams: int = Field(default=2, ge=1)
 
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True

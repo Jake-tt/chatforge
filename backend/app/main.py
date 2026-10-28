@@ -22,6 +22,7 @@ from app.services.redis_guard import RedisGuard
 from app.services.search import BM25Search, SearchProvider, load_markdown_corpus
 from app.services.suggestions import SuggestionService
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
+from app.services.turn_gate import TurnGate
 
 
 def create_app(
@@ -62,6 +63,9 @@ def create_app(
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,
             tasks=queue,
+            # The lock outlives the turn timeout, so it only expires for a lost instance.
+            turns=TurnGate(guard, int(settings.agent_turn_timeout_seconds) + 60,
+                           settings.max_concurrent_streams),
             chat_model=chat_model or build_chat_model(settings, purpose="main"),
             agent=build_agent_graph(),
         )

@@ -196,7 +196,7 @@ async def test_router_and_every_agent_round_are_billed(make_harness):
     assert (await h.client.get("/usage", headers=headers)).json()["used"] == 165
 
 
-async def test_agent_model_failure_streams_an_error_and_keeps_the_conversation(make_harness):
+async def test_agent_model_failure_streams_an_error_and_undoes_the_turn(make_harness):
     h, agent, headers, cid = await _agent_harness(
         make_harness, routes=[_route()], agent=[ConnectionError("model server down")])
 
@@ -204,7 +204,7 @@ async def test_agent_model_failure_streams_an_error_and_keeps_the_conversation(m
 
     assert result.last("error")["code"] == "llm_unavailable"
     detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
-    assert [m["role"] for m in detail["messages"]] == ["user"]
+    assert detail["messages"] == []  # nothing was shown: the user can simply ask again
 
 
 async def test_a_tool_call_with_bad_arguments_gets_an_error_back_not_a_failed_turn(make_harness):

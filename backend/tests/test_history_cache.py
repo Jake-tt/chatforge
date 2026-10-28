@@ -4,6 +4,7 @@ import asyncio
 import json
 
 from tests.fakes import RecordingChatModel
+from tests.test_resilience import DownRedis
 
 
 async def _setup(make_harness, **settings):
@@ -77,7 +78,9 @@ async def test_cache_window_is_trimmed_to_history_limit(make_harness):
 
 
 async def test_concurrent_messages_get_distinct_contiguous_seqs(make_harness):
-    h, _, headers, cid, _ = await _setup(make_harness)
+    # The conversation lock normally rejects a second turn (409). With Redis down it fails
+    # open, and the atomic seq allocation is what still keeps messages in order.
+    h, _, headers, cid, _ = await _setup(make_harness, redis=DownRedis())
     results = await asyncio.gather(*(h.chat(headers, cid, f"m{i}") for i in range(3)))
     assert all(r.response.status_code == 200 for r in results)
 

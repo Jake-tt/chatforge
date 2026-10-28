@@ -23,6 +23,8 @@ const ERROR_TEXT: Record<string, string> = {
   quota_exceeded: "오늘 사용할 수 있는 토큰을 모두 썼어요. 내일 다시 시도해 주세요.",
   rate_limited: "메시지를 너무 빠르게 보내고 있어요. 잠시 후 다시 시도해 주세요.",
   llm_unavailable: "모델 응답이 중간에 끊겼어요. 다시 시도해 주세요.",
+  stream_in_progress: "이 대화에서 아직 답변을 작성하고 있어요. 끝난 뒤 다시 보내 주세요.",
+  too_many_streams: "동시에 진행 중인 답변이 너무 많아요. 잠시 후 다시 보내 주세요.",
 };
 
 export default function ChatPanel(props: Props) {
@@ -70,13 +72,17 @@ export default function ChatPanel(props: Props) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let received = false; // any answer text arrived (state updates may not have run yet)
     try {
       const conversationId = await props.ensureConversation();
       const done = await api.sendMessage(
         conversationId,
         content,
         {
-          onDelta: (delta) => updateLast((b) => ({ ...b, content: b.content + delta })),
+          onDelta: (delta) => {
+            received = true;
+            updateLast((b) => ({ ...b, content: b.content + delta }));
+          },
           onSources: (citations) => updateLast((b) => ({ ...b, citations })),
           onSuggestions: (suggestions) => updateLast((b) => ({ ...b, suggestions })),
         },
@@ -88,17 +94,18 @@ export default function ChatPanel(props: Props) {
         note: done.stop_reason === "refusal" ? "이 요청에는 답변할 수 없어요." : undefined,
       }));
     } catch (err) {
-      if (controller.signal.aborted) {
-        // Stopped by the user; the server keeps (and bills) what was generated so far.
-        updateLast((b) => ({ ...b, pending: false, note: "응답을 중지했어요." }));
-        return;
+      if (received) {
+        // Keep what streamed: the server stores (and bills) it as the reply.
+        const note = controller.signal.aborted ? "응답을 중지했어요." : undefined;
+        updateLast((b) => ({ ...b, pending: false, note }));
+      } else {
+        // Nothing arrived, so the server undid the whole turn (the user message too):
+        // do the same here and put the question back to resend.
+        setBubbles((prev) => prev.slice(0, -2));
+        setInput(content);
       }
+      if (controller.signal.aborted) return;
       const apiErr = err instanceof ApiError ? err : null;
-      // Keep whatever streamed before the failure; drop the bubble if nothing arrived.
-      setBubbles((prev) => {
-        const last = prev[prev.length - 1];
-        return last.content ? [...prev.slice(0, -1), { ...last, pending: false }] : prev.slice(0, -1);
-      });
       setError({
         code: apiErr?.code ?? "unknown",
         message: (apiErr && ERROR_TEXT[apiErr.code]) ?? apiErr?.message ?? "문제가 발생했어요.",
