@@ -95,6 +95,13 @@ class Settings(BaseSettings):
             ):
                 raise ValueError("cloudtasks backend needs GCP_PROJECT, TASKS_SERVICE_URL, "
                                  "TASKS_INVOKER_SA")
+            # Fail at startup, not on the first chat request.
+            if self.llm_provider == "anthropic" and not self.anthropic_api_key:
+                raise ValueError("LLM_PROVIDER=anthropic needs ANTHROPIC_API_KEY in prod")
+            if self.llm_provider == "ollama" and any(
+                host in self.ollama_base_url for host in ("localhost", "127.0.0.1")
+            ):
+                raise ValueError("LLM_PROVIDER=ollama needs a reachable OLLAMA_BASE_URL in prod")
         return self
 
     def token_weights(self) -> TokenWeights:

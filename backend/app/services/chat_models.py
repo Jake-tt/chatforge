@@ -25,7 +25,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_ollama import ChatOllama
 
 from app.config import Settings
-from app.services.llm import Usage
+from app.services.llm import AUX_EFFORT, AUX_MAX_TOKENS, Usage
 
 Purpose = Literal["main", "aux"]  # main: the answering agent; aux: router, summaries
 
@@ -68,8 +68,8 @@ def build_chat_model(settings: Settings, *, purpose: Purpose) -> BaseChatModel:
         extra = {"api_key": settings.anthropic_api_key} if settings.anthropic_api_key else {}
         return ChatAnthropic(
             model=settings.anthropic_model if main else settings.llm_aux_model,
-            max_tokens=settings.llm_max_tokens if main else 2048,
-            output_config={"effort": settings.llm_effort if main else "low"},
+            max_tokens=settings.llm_max_tokens if main else AUX_MAX_TOKENS,
+            output_config={"effort": settings.llm_effort if main else AUX_EFFORT},
             **extra,
         )
     return EchoChatModel()

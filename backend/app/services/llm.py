@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from app.config import Settings  # config imports TokenWeights from here
 
 
+# Router, summaries, titles: short outputs at low effort, whichever client makes the call.
+AUX_MAX_TOKENS = 2048
+AUX_EFFORT = "low"
+
+
 @dataclass(frozen=True)
 class ChatTurn:
     role: str  # "user" | "assistant"
@@ -145,7 +150,11 @@ class AnthropicProvider:
     _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None):
-        self._client = client or anthropic.AsyncAnthropic()
+        # Same key source as the LangChain models: Settings reads ANTHROPIC_API_KEY from
+        # the environment or .env; the SDK alone would only see the environment.
+        key = settings.anthropic_api_key
+        self._client = client or anthropic.AsyncAnthropic(
+            **({"api_key": key.get_secret_value()} if key else {}))
         self._model = settings.anthropic_model
         self._aux_model = settings.llm_aux_model  # router, summaries, titles
         self._effort = settings.llm_effort
@@ -182,10 +191,10 @@ class AnthropicProvider:
         try:
             response = await self._client.messages.create(
                 model=self._aux_model,
-                max_tokens=2048,
+                max_tokens=AUX_MAX_TOKENS,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
-                output_config={"effort": "low"},
+                output_config={"effort": AUX_EFFORT},
             )
         except anthropic.APIError as exc:
             raise LLMError(str(exc), retryable=True) from exc
@@ -201,11 +210,11 @@ class AnthropicProvider:
         try:
             response = await self._client.messages.parse(
                 model=self._aux_model,
-                max_tokens=2048,
+                max_tokens=AUX_MAX_TOKENS,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
                 output_format=schema,
-                output_config={"effort": "low"},
+                output_config={"effort": AUX_EFFORT},
             )
         except anthropic.APIError as exc:
             raise LLMError(str(exc), retryable=True) from exc
@@ -247,6 +256,10 @@ class FakeProvider:
 
 
 def build_provider(settings: Settings) -> LLMProvider:
+    if settings.llm_provider == "ollama":
+        # Ollama is reached only through the agent graph's LangChain models; falling back to
+        # the echo model here would hide the misconfiguration.
+        raise ValueError("LLM_PROVIDER=ollama requires the agent graph (services.chat_models)")
     if settings.llm_provider == "anthropic":
         return AnthropicProvider(settings)
     return FakeProvider(delay=0.03 if settings.env == "dev" else 0.0)

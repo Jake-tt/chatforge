@@ -1,12 +1,14 @@
 """LangChain chat model layer: provider factory and usage_metadata → Usage for billing."""
 
+import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+from pydantic import ValidationError
 
 from app.config import Settings
 from app.services.chat_models import EchoChatModel, build_chat_model, usage_from_message
-from app.services.llm import Usage
+from app.services.llm import AUX_MAX_TOKENS, Usage, build_provider
 
 
 def _settings(**overrides) -> Settings:
@@ -80,3 +82,75 @@ async def test_fake_model_streams_an_echo_with_word_count_usage():
     assert [c.content for c in chunks if c.content] == [
         "(fake)", " You", " said:", " hello", " there"]
     assert usage_from_message(full) == Usage(input_tokens=4, output_tokens=5)
+
+
+def test_cache_writes_of_both_ttls_add_up_and_take_precedence():
+    message = AIMessage("hi", usage_metadata={
+        "input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001,
+        "input_token_details": {"cache_read": 0, "cache_creation": 999,
+                                "ephemeral_5m_input_tokens": 300,
+                                "ephemeral_1h_input_tokens": 200},
+    })
+
+    assert usage_from_message(message) == Usage(500, 1, 0, 500)
+
+
+def test_uncached_input_never_goes_negative():
+    # A provider that already excludes cached tokens from input_tokens must not produce a
+    # negative charge.
+    message = AIMessage("hi", usage_metadata={
+        "input_tokens": 10, "output_tokens": 1, "total_tokens": 11,
+        "input_token_details": {"cache_read": 50},
+    })
+
+    assert usage_from_message(message).input_tokens == 0
+
+
+def test_main_and_aux_models_have_different_output_budgets():
+    settings = _settings(llm_provider="anthropic", llm_max_tokens=16000,
+                         anthropic_api_key="test")
+
+    main = build_chat_model(settings, purpose="main")
+    aux = build_chat_model(settings, purpose="aux")
+
+    assert (main.max_tokens, aux.max_tokens) == (16000, AUX_MAX_TOKENS)
+
+
+def test_anthropic_key_falls_back_to_the_environment(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
+
+    model = build_chat_model(_settings(llm_provider="anthropic"), purpose="main")
+
+    assert model.anthropic_api_key.get_secret_value() == "from-env"
+
+
+def test_ollama_context_window_and_determinism_follow_settings():
+    model = build_chat_model(_settings(llm_provider="ollama", ollama_num_ctx=4096),
+                             purpose="aux")
+
+    assert (model.num_ctx, model.temperature) == (4096, 0)
+
+
+async def test_fake_model_reports_usage_on_invoke_too():
+    model = build_chat_model(_settings(llm_provider="fake"), purpose="aux")
+
+    message = await model.ainvoke([HumanMessage("hello there")])
+
+    assert message.content == "(fake) You said: hello there"
+    assert usage_from_message(message) == Usage(input_tokens=2, output_tokens=5)
+
+
+def test_the_legacy_provider_path_refuses_ollama():
+    # Only the agent graph speaks to Ollama; silently echoing would hide the misconfiguration.
+    with pytest.raises(ValueError, match="agent"):
+        build_provider(_settings(llm_provider="ollama"))
+
+
+@pytest.mark.parametrize("overrides, message", [
+    ({"llm_provider": "anthropic"}, "ANTHROPIC_API_KEY"),
+    ({"llm_provider": "ollama"}, "OLLAMA_BASE_URL"),
+])
+def test_prod_refuses_to_start_with_unusable_llm_settings(monkeypatch, overrides, message):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match=message):
+        _settings(env="prod", jwt_secret="x" * 40, **overrides)
