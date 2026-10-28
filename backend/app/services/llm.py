@@ -105,9 +105,10 @@ class TextResult:
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, retryable: bool):
+    def __init__(self, message: str, retryable: bool, usage: Usage | None = None):
         super().__init__(message)
         self.retryable = retryable
+        self.usage = usage or Usage()  # tokens spent before the failure, still billable
 
 
 class LLMProvider(Protocol):
@@ -257,9 +258,10 @@ class FakeProvider:
 
 def build_provider(settings: Settings) -> LLMProvider:
     if settings.llm_provider == "ollama":
-        # Ollama is reached only through the agent graph's LangChain models; falling back to
-        # the echo model here would hide the misconfiguration.
-        raise ValueError("LLM_PROVIDER=ollama requires the agent graph (services.chat_models)")
+        # Imported here: chat_models builds on the types in this module.
+        from app.services.chat_models import LangChainProvider, build_chat_model
+        return LangChainProvider(build_chat_model(settings, purpose="main"),
+                                 build_chat_model(settings, purpose="aux"))
     if settings.llm_provider == "anthropic":
         return AnthropicProvider(settings)
     return FakeProvider(delay=0.03 if settings.env == "dev" else 0.0)

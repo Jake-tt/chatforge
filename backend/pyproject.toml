@@ -22,6 +22,7 @@ dependencies = [
     "langchain-core>=1.7",
     "langchain-anthropic>=1.7",
     "langchain-ollama>=1.1",
+    "langgraph>=1.2",
     "tzdata>=2024.2",
 ]
 

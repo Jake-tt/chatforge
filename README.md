@@ -137,7 +137,31 @@ flowchart LR
 - **정합성**: 요약과 경계는 같은 행에 있고, "작업을 시작할 때의 경계와 같을 때만" 한 번의 UPDATE로 함께 바뀝니다. Cloud Tasks가 같은 작업을 겹쳐 전달해도 한 결과만 반영됩니다. 읽는 쪽은 항상 짝이 맞는 요약과 경계를 받으므로 메시지가 빠지거나 두 번 들어가지 않습니다.
 - **실패 시**: 요약 호출 실패, 타임아웃, 길이 초과면 아무것도 바꾸지 않고 기존처럼 전체 창을 보냅니다. 토큰은 실제로 반영된 요약만 대화 소유자에게 과금합니다. 재시도나 경쟁에서 진 실행 비용은 서비스가 부담합니다.
 
-### 11. 관측성
+### 11. LangGraph 에이전트 (`AGENT_ENABLED`)
+[`app/agent/graph.py`](backend/app/agent/graph.py) · [`tools.py`](backend/app/agent/tools.py) · 테스트 [`test_agent.py`](backend/tests/test_agent.py)
+
+실무에서 설계한 LangGraph 에이전트 구조를 설계만 가져와 새로 구현했습니다(회사 코드는 사용하지 않았습니다).
+
+```
+router ─▶ master_router ─┬─▶ clarify ─▶ END
+                         ├─▶ coordinator ─▶ agent
+                         └─▶ agent ⇄ tools ─▶ END
+```
+
+- **router → master_router**: 구조화 출력 한 번으로 이번 턴에 필요한 것(도움말, 본인 계정, 지난 대화)을 판단하거나, 질문이 모호해서 되물어야 하는지 판단합니다. 조건부 엣지가 세 갈래로 보냅니다.
+- **clarify**: 라우터가 만든 되묻는 질문이 곧 답입니다. 모델을 다시 부르지 않고, 이 턴에서는 추천 질문과 요약을 실행하지 않습니다. 요약하면 사용자가 곧 답할 질문이 요약에 묻히기 때문입니다(실무 사례 5).
+- **coordinator**: 라우터가 요청한 소스를 병렬로 조회해 현재 턴에 근거로 붙입니다(설계 포인트 6).
+- **agent ⇄ tools (ReAct)**: 미리 조회한 근거로 부족하면 모델이 도구를 호출합니다. 한 메시지의 여러 도구 호출은 병렬로 실행하고, 출처 번호는 앞선 출처에 이어서 매깁니다.
+- **라우터가 실패하면**: 검색 없이 답하지 않고 agent에게 도구 선택을 맡깁니다. 라우팅은 최적화일 뿐이고, 에이전트는 스스로 판단할 수 있기 때문입니다.
+- **실패 처리 (실무 사례 3)**: 형식이 깨진 도구 호출은 **도구를 뺀 채** 1회 재시도합니다. 도구를 붙인 채 다시 물으면 같은 잘못된 호출을 반복했기 때문입니다. 도구 라운드는 상한(`AGENT_MAX_TOOL_ROUNDS`)이 있고, 닿으면 도구 없이 답하게 합니다. 도구 실패나 인자 오류는 턴을 끝내지 않고 모델에게 에러로 돌려줍니다. LangChain은 잘린 인자를 `{}`로 살려 "정상 호출"로 만들기도 해서, 인자 검증은 도구 쪽에서 합니다.
+- **SSE 계약 유지**: `messages` 스트림에서 agent 노드의 AI 청크만 `delta`로 내보냅니다. 라우터의 모델 호출과, 노드가 다시 써 넣은 사용자 메시지는 걸러냅니다. 과금은 router와 모든 agent 라운드의 토큰을 합산하고, 파싱에 실패한 라우터 호출의 토큰도 포함합니다.
+- **서두 문제**: 도구를 호출하는 라운드에서 모델이 "찾아볼게요" 같은 서두를 쓰면, 그대로 흘려보낼 경우 최종 답변 앞에 붙어 버립니다. 그래서 라운드마다 텍스트를 잠깐 붙잡아 둡니다. 도구 호출이 나오면 버리고, 일정 길이(`HOLDBACK_CHARS`)를 넘도록 도구 호출이 없으면 답변으로 보고 흘려보냅니다. 저장하는 답은 그래프가 확정한 최종 `answer`입니다. 이 판단은 순수 객체 [`AgentStream`](backend/app/agent/stream.py)에 있어서 단위 테스트로 검증합니다.
+- **비용·부하 상한**: 도구 라운드 수와 라운드당 도구 호출 수(기본 3, 4)에 상한이 있습니다. "키워드 50개로 각각 검색해줘" 같은 요청이 지난 대화 검색 50건을 동시에 일으키지 못하게 하기 위해서입니다. 모든 agent 모델 호출에는 타임아웃이 있습니다.
+- **프롬프트 인젝션 방어**: 도구 결과(도움말 문서, 사용자의 지난 메시지)는 `<sources>`로 감싸고 "지시가 아니라 자료"라고 명시합니다. 도구에는 사용자 ID 같은 인자가 없고, 소유자 필터는 요청 시점에 고정됩니다. 그래서 인젝션으로도 다른 사용자의 데이터에는 닿을 수 없습니다.
+- **프롬프트 캐싱 유지**: Claude로 돌릴 때도 system과 직전 턴에 캐시 breakpoint를 둡니다. 라우터 실패 안내는 system이 아니라 현재 턴에 붙여, 캐시된 앞부분을 바꾸지 않습니다.
+- **모델**: LangChain 채팅 모델 계층(`build_chat_model`)으로 provider를 고릅니다. 로컬은 도구 호출을 지원하는 Qwen3 8B(Ollama, `reasoning=False`)를 씁니다. 같은 모델이 `LangChainProvider`를 통해 라우팅·압축·추천 질문·요약도 맡습니다.
+
+### 12. 관측성
 [`app/observability.py`](backend/app/observability.py)
 
 - Cloud Logging이 파싱하는 JSON 한 줄 로그를 씁니다. `severity`로 로그 레벨을, `logging.googleapis.com/trace`로 Cloud Trace를 연결합니다.
@@ -233,10 +257,17 @@ uvicorn app.main:create_app --factory --reload
 
 Redis가 없어도 서버는 동작합니다. 위의 장애 대응 경로가 그대로 쓰입니다.
 
+**로컬 LLM으로 에이전트 실행 (Ollama, 과금 없음)**
+
+```bash
+ollama pull qwen3:8b && ollama serve &          # 16GB Apple Silicon에서 동작
+LLM_PROVIDER=ollama AGENT_ENABLED=true uvicorn app.main:create_app --factory --reload
+```
+
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 82개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 135개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 
@@ -272,7 +303,8 @@ backend/
     models.py          # SQLAlchemy 모델
     deps.py            # 인증 → Principal(user | guest)
     routers/           # auth, conversations(SSE), usage, internal(Cloud Tasks)
-    services/          # llm, rag, retrieval, search, past_conversations, history, summary,
+    agent/             # LangGraph 그래프(graph.py)와 ReAct 도구(tools.py)
+    services/          # llm, chat_models, rag, retrieval, search, past_conversations, history, summary,
                        # quota, claim, suggestions, tasks
     observability.py   # JSON 로그, 요청·트레이스 ID
   knowledge/           # RAG용 도움말 문서 (마크다운)

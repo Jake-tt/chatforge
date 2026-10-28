@@ -44,6 +44,7 @@ AI 에이전트와 사람이 같은 기준으로 작업하기 위한 저장소 �
 - 쿼터 과금은 `Usage.billed(settings.token_weights())`로 한다. 원시 토큰 합계를 과금하지 않는다.
 - 대화 요약은 `services.summary`가 소유한다. 경계는 user 메시지 직전에만 두고, 요약과 경계는 조건부 UPDATE 한 번으로 함께 바꾼다.
 - 검색 소스는 `retrieval.gather_sources`로 병렬 실행한다. 사용자 데이터를 검색할 때는 소유자 조건을 새로 쓰지 말고 `conversations._owned_by`를 넘겨 쓴다.
+- 에이전트 그래프(`app/agent/`)의 노드는 `Runtime[AgentContext]`로 요청별 의존성을 받는다. 노드에서 모델이나 DB 세션을 직접 만들지 않는다. 새 도구는 `agent/tools.py`의 `Tool`로 만들고, 실패는 예외 대신 `ToolOutput.failed`로 모델에게 돌려준다.
 - 모델 출력은 UI나 프롬프트에 들어가기 전에 검증한다(`suggestions.FollowUps`, `rag._keeps_citations` 참고). 구조화 출력은 형태만 보장하고 내용은 보장하지 않는다.
 - 메시지 순서는 `created_at`이 아니라 `seq`(`_allocate_seq`로 할당)로 정한다.
 - 에러는 `errors.ApiError(status, code, message)`로 낸다. 프론트엔드는 `code`로 분기한다.

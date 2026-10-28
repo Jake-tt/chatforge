@@ -31,7 +31,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from app.config import Settings
-from app.services.llm import ChatTurn, LLMProvider, Usage
+from app.services.llm import ChatTurn, LLMError, LLMProvider, Usage
 from app.services.quota import QuotaStatus
 from app.services.retrieval import SourceSpec, gather_sources
 from app.services.search import SearchHit, SearchProvider
@@ -130,66 +130,90 @@ class RagPipeline:
                      past: PastSearch | None = None) -> GroundingResult:
         """`account`: the user's plan and usage. `past`: searches their earlier
         conversations. Each is used only when the router asks for it."""
-        usage = Usage()
-        started = time.perf_counter()
-        decision, route_usage = await self._route(turns)
-        usage += route_usage
+        decision, route_usage, hybrid = await self.route(turns)
+        result = await self.gather(
+            decision.query.strip() or turns[-1].content,
+            search_help=decision.needs_search or hybrid,
+            account=account if decision.needs_account else None,
+            past=past if decision.needs_past else None,
+        )
+        return GroundingResult(result.grounding, route_usage + result.usage)
+
+    @property
+    def search(self) -> SearchProvider:
+        return self._search
+
+    def hybrid(self, turns: list[ChatTurn], query: str) -> bool:
+        """From the Nth user turn on, search whenever a query exists (see module doc)."""
         user_turns = sum(t.role == "user" for t in turns)
-        hybrid = user_turns >= self._s.search_after_turns and bool(decision.query.strip())
+        return user_turns >= self._s.search_after_turns and bool(query.strip())
+
+    async def classify[M: RouteDecision](self, turns: list[ChatTurn], system: str,
+                                         schema: type[M]) -> tuple[M | None, Usage]:
+        """One structured routing call with the router timeout; None if it failed."""
+        try:
+            async with asyncio.timeout(self._s.router_timeout_seconds):
+                return await self._llm.structured(system, router_prompt(turns), schema)
+        except TimeoutError:
+            log.warning("router timed out")
+        except LLMError as exc:
+            log.warning("router failed: %s", exc)
+            return None, exc.usage
+        except Exception:
+            log.warning("router failed", exc_info=True)
+        return None, Usage()
+
+    async def route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage, bool]:
+        """The router's decision, its tokens, and whether hybrid search applies."""
+        started = time.perf_counter()
+        decision, usage = await self.classify(turns, ROUTER_SYSTEM, RouteDecision)
+        # Routing is an optimisation: a failed router means answering without search.
+        decision = decision or RouteDecision(needs_search=False)
+        hybrid = self.hybrid(turns, decision.query)
         log.info("rag route", extra={
             "needs_search": decision.needs_search, "needs_account": decision.needs_account,
             "needs_past": decision.needs_past, "hybrid": hybrid, "query": decision.query,
             "router_ms": round((time.perf_counter() - started) * 1000),
         })
-        query = decision.query.strip() or turns[-1].content
-        pinned = [account] if decision.needs_account and account is not None else []
+        return decision, usage, hybrid
+
+    async def gather(self, query: str, *, search_help: bool, account: SearchHit | None,
+                     past: PastSearch | None) -> GroundingResult:
+        """Run the selected sources concurrently and build the grounding for one turn."""
+        pinned = [account] if account is not None else []
         sources: list[SourceSpec] = []
-        if decision.needs_search or hybrid:
+        if search_help:
             sources.append(SourceSpec(
                 "help", lambda: self._search.search(query, self._s.search_top_k),
                 self._s.search_timeout_seconds))
-        if decision.needs_past and past is not None:
+        if past is not None:
             sources.append(SourceSpec("past", lambda: past(query),
                                       self._s.search_timeout_seconds))
         searched = await self._retrieve(sources) if sources else []
         if not (pinned or searched):
-            return GroundingResult(None, usage)
+            return GroundingResult(None, Usage())
 
         citations = [Citation(i, h.title, h.url, h.text)
                      for i, h in enumerate([*pinned, *searched], start=1)]
         # Pinned facts (the user's own figures) are sent verbatim; only search results are
         # compressed, since a summary may reword a number or drop a source.
-        searched_body, compressed, compress_usage = await self._searched_body(
+        searched_body, compressed, usage = await self._searched_body(
             query, citations[len(pinned):])
-        usage += compress_usage
-        body = "\n\n".join(b for b in (_render(citations[:len(pinned)]), searched_body) if b)
+        body = "\n\n".join(b for b in (render_sources(citations[:len(pinned)]), searched_body) if b)
         return GroundingResult(
             Grounding(citations, GROUNDING_TEMPLATE.format(body=body), compressed), usage
         )
 
     async def _searched_body(self, query: str, citations: list[Citation]
                              ) -> tuple[str, bool, Usage]:
-        body = _render(citations)
+        body = render_sources(citations)
         if len(body) <= self._s.grounding_char_budget:
             return body, False, Usage()
         summary, usage = await self._compress(query, body, {c.n for c in citations})
         if summary:
             return summary, True, usage
         per_source = self._s.grounding_char_budget // len(citations)
-        return _render(citations, per_source=per_source), False, usage
-
-    async def _route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage]:
-        recent = "\n".join(f"{t.role}: {t.content[:500]}" for t in turns[-6:-1])
-        prompt = f"Conversation so far:\n{recent or '(none)'}\n\n" \
-                 f"Latest user message: {turns[-1].content}"
-        try:
-            async with asyncio.timeout(self._s.router_timeout_seconds):
-                return await self._llm.structured(ROUTER_SYSTEM, prompt, RouteDecision)
-        except TimeoutError:
-            log.warning("rag router timed out; answering without search")
-        except Exception:
-            log.warning("rag router failed; answering without search", exc_info=True)
-        return RouteDecision(needs_search=False), Usage()
+        return render_sources(citations, per_source=per_source), False, usage
 
     async def _retrieve(self, sources: list[SourceSpec]) -> list[SearchHit]:
         started = time.perf_counter()
@@ -223,7 +247,13 @@ class RagPipeline:
         return result.text, result.usage
 
 
-def _render(citations: list[Citation], per_source: int | None = None) -> str:
+def router_prompt(turns: list[ChatTurn]) -> str:
+    recent = "\n".join(f"{t.role}: {t.content[:500]}" for t in turns[-6:-1])
+    return f"Conversation so far:\n{recent or '(none)'}\n\n" \
+           f"Latest user message: {turns[-1].content}"
+
+
+def render_sources(citations: list[Citation], per_source: int | None = None) -> str:
     def clip(text: str) -> str:
         return text if per_source is None or len(text) <= per_source \
             else text[:per_source].rstrip() + "…"

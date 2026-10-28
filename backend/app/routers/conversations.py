@@ -5,6 +5,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import aclosing
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response
@@ -13,6 +14,9 @@ from sqlalchemy import ColumnElement, and_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.agent.graph import AgentContext
+from app.agent.stream import AgentStream
+from app.agent.tools import build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
@@ -162,9 +166,10 @@ async def send_message(
         else None
     past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
         else None
+    job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
+                   is_first_message, account, past)
     return StreamingResponse(
-        _stream_reply(ctx, principal, conversation.id, system, turns, body.content,
-                      is_first_message, account, past),
+        _stream_agent_reply(job) if ctx.agent is not None else _stream_reply(job),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -213,33 +218,41 @@ def _estimate_tokens(text: str) -> int:
     return max(len(text) // 4, 1)
 
 
-async def _stream_reply(
-    ctx: AppContext,
-    principal: Principal,
-    conversation_id: uuid.UUID,
-    system: str,
-    turns: list[ChatTurn],
-    first_message: str,
-    is_first_message: bool,
-    account: SearchHit | None,
-    past: PastSearch | None,
-) -> AsyncIterator[str]:
+@dataclass(frozen=True)
+class ReplyJob:
+    """Everything one assistant reply needs, captured before the request session closes."""
+
+    ctx: AppContext
+    principal: Principal
+    conversation_id: uuid.UUID
+    system: str
+    turns: list[ChatTurn]
+    first_message: str
+    is_first_message: bool
+    account: SearchHit | None
+    past: PastSearch | None
+
+
+def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Usage) -> Usage:
+    # Aborted streams don't report final usage; charge an estimate so that disconnecting
+    # mid-reply can't be used to dodge the quota.
+    prompt = job.system + "".join(t.context + t.content for t in turns)
+    return aux + Usage(_estimate_tokens(prompt), _estimate_tokens(partial))
+
+
+async def _stream_reply(job: ReplyJob) -> AsyncIterator[str]:
+    ctx = job.ctx
+    turns = job.turns
     parts: list[str] = []
     completion: Completion | None = None
     aux_usage = Usage()  # routing + source compression, charged with the answer
     citations: list[dict] | None = None
 
-    def estimated_usage() -> Usage:
-        # Aborted streams don't report final usage; charge an estimate so that
-        # disconnecting mid-reply can't be used to dodge the quota.
-        prompt = system + "".join(t.context + t.content for t in turns)
-        return aux_usage + Usage(_estimate_tokens(prompt), _estimate_tokens("".join(parts)))
-
     try:
         if ctx.rag is not None:
             # Flush headers now; routing and search take a moment before the first token.
             yield ": grounding\n\n"
-            result = await ctx.rag.ground(turns, account=account, past=past)
+            result = await ctx.rag.ground(turns, account=job.account, past=job.past)
             aux_usage = result.usage
             if result.grounding is not None:
                 # With the current turn, not the system prompt: see ChatTurn.context.
@@ -248,7 +261,7 @@ async def _stream_reply(
                 citations = [c.as_dict() for c in result.grounding.citations]
                 yield _sse("sources", {"citations": citations})
 
-        async with aclosing(ctx.llm.stream(system, turns)) as events:
+        async with aclosing(ctx.llm.stream(job.system, turns)) as events:
             async for event in events:
                 if isinstance(event, TextDelta):
                     parts.append(event.text)
@@ -256,39 +269,131 @@ async def _stream_reply(
                 else:
                     completion = event
     except LLMError as exc:
-        log.warning("llm stream failed: %s", exc)
-        await _persist_reply(ctx, principal, conversation_id, "".join(parts),
-                             estimated_usage(), citations)
-        yield _sse("error", {"code": "llm_unavailable",
-                             "message": "The model is unavailable, please retry",
-                             "retryable": exc.retryable})
+        yield await _fail_reply(job, "".join(parts),
+                                _estimated_usage(job, turns, "".join(parts), aux_usage),
+                                citations, exc)
         return
     except (asyncio.CancelledError, GeneratorExit):
         # Shielded so the write survives the cancellation of this request.
         await asyncio.shield(_persist_reply(
-            ctx, principal, conversation_id, "".join(parts), estimated_usage(), citations
-        ))
+            job, "".join(parts), _estimated_usage(job, turns, "".join(parts), aux_usage),
+            citations))
         raise
 
     assert completion is not None, "provider must finish with a Completion"
-    usage = aux_usage + Usage.of(completion)
-    answer = "".join(parts)
-    if ctx.suggestions is not None and answer and completion.stop_reason != "refusal":
+    async for event in _finish_reply(job, turns, "".join(parts),
+                                     aux_usage + Usage.of(completion), citations,
+                                     completion.stop_reason):
+        yield event
+
+
+async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
+    """The same SSE contract as `_stream_reply`, produced by the LangGraph agent.
+
+    `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
+    events; this function only drives the graph, handles failure, and finishes the reply.
+    """
+    ctx = job.ctx
+    stream = AgentStream(turns=job.turns)
+    try:
+        # Flush headers now; routing and lookups take a moment before the first token.
+        yield ": routing\n\n"
+        async for mode, payload in ctx.agent.astream(
+            {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
+             "usage": Usage()},
+            context=_agent_context(job), stream_mode=["messages", "updates"],
+        ):
+            if mode == "messages":
+                events = stream.on_message(*payload)
+            else:
+                events = [e for update in payload.values() if update
+                          for e in stream.on_update(update)]
+            for name, data in events:
+                yield _sse(name, data)
+    except (asyncio.CancelledError, GeneratorExit):
+        partial = stream.partial
+        await asyncio.shield(_persist_reply(
+            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            stream.citations or None))
+        raise
+    except Exception as exc:
+        partial = stream.partial
+        yield await _fail_reply(
+            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            stream.citations or None, _as_llm_error(exc))
+        return
+
+    async for event in _finish_reply(
+        job, stream.turns, stream.text, stream.usage, stream.citations or None,
+        stream.stop_reason, followups=not stream.clarified, summarize=not stream.clarified,
+    ):
+        yield event
+
+
+def _agent_context(job: ReplyJob) -> AgentContext:
+    ctx, s = job.ctx, job.ctx.settings
+    return AgentContext(
+        model=ctx.chat_model, rag=ctx.rag,
+        tools=build_tools(s, ctx.rag, job.account, job.past),
+        system=job.system, account=job.account, past=job.past,
+        max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
+        timeout_seconds=s.agent_timeout_seconds,
+        prompt_cache=s.llm_provider == "anthropic",
+    )
+
+
+_NOT_RETRYABLE = (TypeError, ValueError, KeyError, AttributeError, AssertionError)
+
+
+def _as_llm_error(exc: Exception) -> LLMError:
+    """Model and network failures may succeed on retry; a bug in our code won't."""
+    if isinstance(exc, LLMError):
+        return exc
+    return LLMError(str(exc) or type(exc).__name__,
+                    retryable=not isinstance(exc, _NOT_RETRYABLE))
+
+
+async def _fail_reply(job: ReplyJob, partial: str, usage: Usage, citations: list[dict] | None,
+                      exc: LLMError) -> str:
+    log.warning("llm stream failed: %s", exc)
+    await _persist_reply(job, partial, usage, citations)
+    return _sse("error", {"code": "llm_unavailable",
+                          "message": "The model is unavailable, please retry",
+                          "retryable": exc.retryable})
+
+
+def _wants_followups(ctx: AppContext, answer: str, stop_reason: str | None,
+                     followups: bool) -> bool:
+    return followups and ctx.suggestions is not None and bool(answer) \
+        and stop_reason != "refusal"
+
+
+async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
+                        citations: list[dict] | None, stop_reason: str | None, *,
+                        followups: bool = True, summarize: bool = True,
+                        ) -> AsyncIterator[str]:
+    """Suggestions, storage and billing, background tasks, then `done`.
+
+    A clarifying turn passes `followups=False, summarize=False`: suggestions would answer
+    for the user, and summarizing would fold the open question away.
+    """
+    ctx = job.ctx
+    if _wants_followups(ctx, answer, stop_reason, followups):
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
         usage += suggestion_usage
         if questions:
             yield _sse("suggestions", {"questions": questions})
-    message_id = await _persist_reply(ctx, principal, conversation_id, answer, usage, citations)
-    if is_first_message:
+    message_id = await _persist_reply(job, answer, usage, citations)
+    if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
-            "conversation_id": str(conversation_id), "first_message": first_message,
+            "conversation_id": str(job.conversation_id), "first_message": job.first_message,
         })
-    if message_id is not None and summary.needs_summary(
+    if summarize and message_id is not None and summary.needs_summary(
         ctx.settings, [*turns, ChatTurn("assistant", answer)]
     ):
         try:
             await ctx.tasks.enqueue(summary.TASK_NAME,
-                                    {"conversation_id": str(conversation_id)})
+                                    {"conversation_id": str(job.conversation_id)})
         except Exception:
             # Only an optimisation; the next turn enqueues it again. The reply is stored
             # and charged, so the client must still get `done`.
@@ -300,14 +405,12 @@ async def _stream_reply(
         "cache_read_tokens": usage.cache_read_tokens,
         "cache_write_tokens": usage.cache_write_tokens,
         "billed_tokens": usage.billed(ctx.settings.token_weights()),
-        "stop_reason": completion.stop_reason,
+        "stop_reason": stop_reason,
     })
 
 
 async def _persist_reply(
-    ctx: AppContext,
-    principal: Principal,
-    conversation_id: uuid.UUID,
+    job: ReplyJob,
     text: str,
     usage: Usage,
     citations: list[dict] | None,
@@ -317,6 +420,7 @@ async def _persist_reply(
     With no text (failed or cancelled before the first token) only the tokens already
     spent on routing/search are charged, and no empty message is stored.
     """
+    ctx, principal, conversation_id = job.ctx, job.principal, job.conversation_id
     billed = usage.billed(ctx.settings.token_weights())
     if not text and not billed:
         return None

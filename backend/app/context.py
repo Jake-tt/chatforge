@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+from typing import Any
 
+from langchain_core.language_models import BaseChatModel
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -28,3 +30,5 @@ class AppContext:
     rag: RagPipeline | None
     suggestions: SuggestionService | None
     tasks: TaskQueue
+    chat_model: BaseChatModel | None = None  # the agent's answering model
+    agent: Any = None  # compiled LangGraph graph, when AGENT_ENABLED
