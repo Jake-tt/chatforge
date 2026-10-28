@@ -1,3 +1,4 @@
+import ipaddress
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -27,6 +28,30 @@ class Principal:
 
 def get_ctx(request: Request) -> AppContext:
     return request.app.state.ctx
+
+
+def client_ip(request: Request, trusted_proxy_hops: int) -> str:
+    """The client address to rate-limit by: the one the outermost trusted proxy saw.
+
+    Each proxy appends to X-Forwarded-For, so the client controls everything left of the
+    entries our proxies added. IPv6 is grouped by /64, the block one subscriber usually
+    gets, so rotating addresses inside it doesn't open new buckets."""
+    peer = request.client.host if request.client else "unknown"
+    address = peer
+    if trusted_proxy_hops:
+        hops = [h.strip() for v in request.headers.getlist("x-forwarded-for")
+                for h in v.split(",")]
+        hops = [h for h in hops if h]
+        # Fewer entries than proxies: the request didn't take the expected path.
+        if len(hops) >= trusted_proxy_hops:
+            address = hops[-trusted_proxy_hops]
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return peer
+    if ip.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 
 async def get_session(ctx: AppContext = Depends(get_ctx)) -> AsyncIterator[AsyncSession]:

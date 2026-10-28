@@ -99,9 +99,18 @@ class QuotaService:
         # If this fails, the stale value expires with the short TTL; the DB stays correct.
         await self._guard.call(lambda r: r.delete(*keys), None)
 
+    @staticmethod
+    def window_remaining(window_seconds: int) -> int:
+        """Seconds until the current fixed window, and every counter in it, rolls over."""
+        return window_seconds - int(time.time()) % window_seconds
+
+    @staticmethod
+    def _window_key(bucket: str, window_seconds: int) -> str:
+        return f"rl:{bucket}:{int(time.time() // window_seconds)}"
+
     async def hit_rate_limit(self, bucket: str, limit: int, window_seconds: int) -> bool:
         """Fixed-window counter. Returns True when the caller is over the limit."""
-        key = f"rl:{bucket}:{int(time.time() // window_seconds)}"
+        key = self._window_key(bucket, window_seconds)
 
         async def incr(r: Redis) -> int:
             async with r.pipeline(transaction=True) as pipe:
@@ -112,3 +121,7 @@ class QuotaService:
 
         count = await self._guard.call(incr, 0)  # fail open
         return count > limit
+
+    async def reset_rate_limit(self, bucket: str, window_seconds: int) -> None:
+        key = self._window_key(bucket, window_seconds)
+        await self._guard.call(lambda r: r.delete(key), None)

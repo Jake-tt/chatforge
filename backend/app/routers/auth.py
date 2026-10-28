@@ -1,10 +1,13 @@
+import hashlib
+import hmac
+
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import AppContext
-from app.deps import Principal, get_ctx, get_principal, get_session
+from app.deps import Principal, client_ip, get_ctx, get_principal, get_session
 from app.errors import ApiError
 from app.models import Guest, User
 from app.schemas import AuthOut, ClaimOut, Credentials, GuestTokenOut, MeOut, UserOut
@@ -12,6 +15,20 @@ from app.security import InvalidToken, create_token, decode_token, hash_password
 from app.services.claim import ClaimResult, claim_guest, guest_subject, user_subject
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+HOUR = 3600
+LOGIN_WINDOW_SECONDS = 15 * 60
+
+
+def _too_many(ctx: AppContext, message: str, window_seconds: int) -> ApiError:
+    retry_after = ctx.quota.window_remaining(window_seconds)
+    return ApiError(429, "rate_limited", message, headers={"Retry-After": str(retry_after)})
+
+
+def _email_bucket(ctx: AppContext, email: str) -> str:
+    # Keyed by a keyed digest: a plain hash of an email is reversible with a list of emails.
+    secret = ctx.settings.jwt_secret.get_secret_value().encode()
+    return "login-fail:" + hmac.new(secret, email.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 @router.post("/guest", response_model=GuestTokenOut, status_code=201)
@@ -22,10 +39,10 @@ async def create_guest(
 ) -> GuestTokenOut:
     # Guests are free to create, so cap creations per IP; otherwise a script could mint
     # unlimited guests and with them unlimited daily quota.
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request, ctx.settings.trusted_proxy_hops)
     limit = ctx.settings.guest_creations_per_hour_per_ip
-    if await ctx.quota.hit_rate_limit(f"guest-create:{ip}", limit, 3600):
-        raise ApiError(429, "rate_limited", "Too many guest sessions from this address")
+    if await ctx.quota.hit_rate_limit(f"guest-create:{ip}", limit, HOUR):
+        raise _too_many(ctx, "Too many guest sessions from this address", HOUR)
 
     guest = Guest()
     session.add(guest)
@@ -40,9 +57,14 @@ async def create_guest(
 @router.post("/signup", response_model=AuthOut, status_code=201)
 async def signup(
     body: Credentials,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> AuthOut:
+    ip = client_ip(request, ctx.settings.trusted_proxy_hops)
+    if await ctx.quota.hit_rate_limit(f"signup:{ip}", ctx.settings.signups_per_hour_per_ip,
+                                      HOUR):
+        raise _too_many(ctx, "Too many signups from this address", HOUR)
     user = User(email=body.email.lower(), password_hash=hash_password(body.password))
     session.add(user)
     try:
@@ -55,13 +77,28 @@ async def signup(
 @router.post("/login", response_model=AuthOut)
 async def login(
     body: Credentials,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> AuthOut:
+    settings = ctx.settings
+    # Checked before the password hash: both limits also cap the CPU an attacker can burn.
+    ip = client_ip(request, settings.trusted_proxy_hops)
+    if await ctx.quota.hit_rate_limit(f"login:{ip}", settings.logins_per_15min_per_ip,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many login attempts from this address", LOGIN_WINDOW_SECONDS)
     # Emails are stored lowercased, so this hits the unique index.
-    user = await session.scalar(select(User).where(User.email == body.email.lower()))
+    email = body.email.lower()
+    # Counts every attempt and is cleared on success, so it measures consecutive failures.
+    bucket = _email_bucket(ctx, email)
+    if await ctx.quota.hit_rate_limit(bucket, settings.login_failures_per_15min_per_email,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many failed logins for this account", LOGIN_WINDOW_SECONDS)
+
+    user = await session.scalar(select(User).where(User.email == email))
     if not verify_password(body.password, user.password_hash if user else None):
         raise ApiError(401, "invalid_credentials", "Email or password is incorrect")
+    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
     return await _finish_auth(ctx, session, user, body.guest_token)
 
 
