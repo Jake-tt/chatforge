@@ -17,6 +17,12 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://chatforge:chatforge@localhost:5432/chatforge"
     redis_url: str = "redis://localhost:6379/0"
+    # Memorystore answers in about a millisecond; anything near these limits is an outage.
+    # Connecting gets more room: a cold, CPU-throttled instance is slow to open sockets.
+    redis_connect_timeout_seconds: float = 1.0
+    redis_socket_timeout_seconds: float = 0.5
+    redis_failure_threshold: int = Field(default=3, ge=1)  # consecutive, to open the breaker
+    redis_cooldown_seconds: float = 10.0
     cors_origins: list[str] = ["http://localhost:5173"]
     log_format: Literal["text", "json"] = "text"  # "json" on Cloud Run
 
