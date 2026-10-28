@@ -38,7 +38,7 @@ async def _agent_harness(make_harness, routes: list, agent: list, delay: float =
     # router's scripted replies.
     tasks = settings.pop("tasks", None) or RecordingQueue()
     h = await make_harness(llm=LangChainProvider(main=EchoChatModel(), aux=router),
-                           chat_model=agent_model, agent_enabled=True,
+                           chat_model=agent_model,
                            **{"rag_enabled": True, "grounding_char_budget": 100_000,
                               **settings}, tasks=tasks)
     headers = await h.guest()
@@ -453,15 +453,3 @@ async def test_a_turn_that_runs_too_long_ends_with_an_error(make_harness):
 
     assert result.last("error")["code"] == "llm_unavailable"
     assert result.last("error")["retryable"] is True
-
-
-async def test_the_legacy_pipeline_still_answers_when_the_agent_is_off(make_harness):
-    # The rollback switch until the legacy pipeline is removed.
-    h = await make_harness(agent_enabled=False)
-    headers = await h.guest()
-    cid = await h.new_conversation(headers)
-
-    result = await h.chat(headers, cid, "hello there")
-
-    assert result.text == "(fake) You said: hello there"
-    assert result.last("done")["stop_reason"] == "end_turn"

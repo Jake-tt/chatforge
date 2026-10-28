@@ -6,44 +6,20 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from app.config import Settings
-from app.services.chat_models import EchoChatModel, LangChainProvider
-from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage, build_provider
+from app.services.chat_models import EchoChatModel, LangChainProvider, to_messages
+from app.services.llm import ChatTurn, LLMError, Usage, build_provider
 from tests.fakes import ScriptedChatModel, structured, usage
 
 
-async def test_stream_yields_text_then_a_completion_with_usage():
-    provider = LangChainProvider(main=EchoChatModel(), aux=EchoChatModel())
-
-    events = [e async for e in provider.stream("sys", [ChatTurn("user", "hello there")])]
-
-    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == \
-        "(fake) You said: hello there"
-    completion = events[-1]
-    assert isinstance(completion, Completion)
-    assert (completion.input_tokens, completion.output_tokens) == (3, 5)
-
-
-async def test_turn_context_is_sent_ahead_of_the_question_but_kept_out_of_history():
-    model = ScriptedChatModel(script=[AIMessage("ok", usage_metadata=usage(1, 1))])
-    provider = LangChainProvider(main=model, aux=model)
+def test_turn_context_is_sent_ahead_of_the_question_but_kept_out_of_history():
     turns = [ChatTurn("user", "q1"), ChatTurn("assistant", "a1"),
              ChatTurn("user", "q2", context="<sources>S</sources>")]
 
-    [e async for e in provider.stream("sys", turns)]
+    sent = to_messages("sys", turns)
 
-    sent = model.calls[0]["messages"]
     assert isinstance(sent[0], SystemMessage) and sent[0].content == "sys"
     assert [m.content for m in sent[1:]] == ["q1", "a1", "<sources>S</sources>\n\nq2"]
     assert isinstance(sent[-1], HumanMessage)
-
-
-async def test_a_failing_model_surfaces_as_a_retryable_llm_error():
-    model = ScriptedChatModel(script=[ConnectionError("model server down")])
-    provider = LangChainProvider(main=model, aux=model)
-
-    with pytest.raises(LLMError) as err:
-        [e async for e in provider.stream("sys", [ChatTurn("user", "hi")])]
-    assert err.value.retryable
 
 
 async def test_complete_returns_text_and_usage_from_the_aux_model():

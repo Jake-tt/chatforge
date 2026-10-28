@@ -62,9 +62,8 @@ def create_app(
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,
             tasks=queue,
-            chat_model=(chat_model or build_chat_model(settings, purpose="main"))
-            if settings.agent_enabled else None,
-            agent=build_agent_graph() if settings.agent_enabled else None,
+            chat_model=chat_model or build_chat_model(settings, purpose="main"),
+            agent=build_agent_graph(),
         )
         try:
             yield
@@ -101,13 +100,10 @@ def create_app(
 
 def _build_rag(
     settings: Settings, llm: LLMProvider, search: SearchProvider | None
-) -> RagPipeline | None:
-    """The agent always routes, so it always gets a pipeline; without a help center its
-    help search is simply absent. The legacy pipeline keeps "no RAG, no pipeline"."""
-    help_center = _help_center(settings, search)
-    if help_center is None and not settings.agent_enabled:
-        return None
-    return RagPipeline(llm, help_center, settings)
+) -> RagPipeline:
+    """The agent always routes, so there is always a pipeline; without a help center
+    (RAG_ENABLED off or no documents) its help search is simply absent."""
+    return RagPipeline(llm, _help_center(settings, search), settings)
 
 
 def _help_center(settings: Settings, search: SearchProvider | None) -> SearchProvider | None:

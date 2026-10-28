@@ -128,19 +128,6 @@ class RagPipeline:
         self._search = search
         self._s = settings
 
-    async def ground(self, turns: list[ChatTurn], account: SearchHit | None = None,
-                     past: PastSearch | None = None) -> GroundingResult:
-        """`account`: the user's plan and usage. `past`: searches their earlier
-        conversations. Each is used only when the router asks for it."""
-        decision, route_usage, hybrid = await self.route(turns)
-        result = await self.gather(
-            decision.query.strip() or turns[-1].content,
-            search_help=decision.needs_search or hybrid,
-            account=account if decision.needs_account else None,
-            past=past if decision.needs_past else None,
-        )
-        return GroundingResult(result.grounding, route_usage + result.usage)
-
     @property
     def search(self) -> SearchProvider | None:
         return self._search
@@ -164,20 +151,6 @@ class RagPipeline:
         except Exception:
             log.warning("router failed", exc_info=True)
         return None, Usage()
-
-    async def route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage, bool]:
-        """The router's decision, its tokens, and whether hybrid search applies."""
-        started = time.perf_counter()
-        decision, usage = await self.classify(turns, ROUTER_SYSTEM, RouteDecision)
-        # Routing is an optimisation: a failed router means answering without search.
-        decision = decision or RouteDecision(needs_search=False)
-        hybrid = self.hybrid(turns, decision.query)
-        log.info("rag route", extra={
-            "needs_search": decision.needs_search, "needs_account": decision.needs_account,
-            "needs_past": decision.needs_past, "hybrid": hybrid, "query": decision.query,
-            "router_ms": round((time.perf_counter() - started) * 1000),
-        })
-        return decision, usage, hybrid
 
     async def gather(self, query: str, *, search_help: bool, account: SearchHit | None,
                      past: PastSearch | None) -> GroundingResult:

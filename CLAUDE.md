@@ -35,7 +35,7 @@ AI 에이전트와 사람이 같은 기준으로 작업하기 위한 저장소 �
 ## 아키텍처 규칙
 
 - 라우트는 `deps.get_ctx`로 `AppContext`(`main.py` lifespan에서 생성)를 받는다. 라우트 안에서 엔진, Redis 클라이언트, LLM 클라이언트를 만들지 않는다.
-- LLM 호출은 `services.llm.LLMProvider`를 통해서만 한다. 테스트는 `FakeProvider`나 스텁을 쓴다.
+- 답변 모델은 `services.chat_models.build_chat_model`의 LangChain 채팅 모델, 보조 호출(라우팅·압축·추천 질문·제목·요약)은 `services.llm.LLMProvider`를 통해서만 한다. 테스트는 답변에 `tests/fakes.py`의 `ScriptedChatModel`·`RecordingChatModel`, 보조 호출에 `FakeProvider`나 스텁을 쓴다.
 - 쿼터의 기준값은 `usage_daily`다. Redis 접근은 전부 `services.redis_guard.RedisGuard`를 거쳐 서킷 브레이커의 보호를 받는다. `KEYS`는 쓰지 않고, 패턴 삭제는 `RedisGuard.scan_delete`를 쓴다.
 - 사용량을 기록하는 코드는 과금 대상 데이터와 같은 트랜잭션에서 실행하고, 커밋 후 `quota.invalidate(...)`를 호출한다.
 - 백그라운드 작업은 `TaskQueue`를 거친다. 핸들러는 멱등해야 한다(at-least-once 전달).
@@ -92,13 +92,13 @@ AI 에이전트와 사람이 같은 기준으로 작업하기 위한 저장소 �
 - 경고를 무시하지 않고 원인을 해결한다.
 
 ### Mock 경계
-- **외부 경계만 mock한다**: LLM(`FakeProvider`), Redis(`fakeredis`), 검색(`SearchProvider` 스텁), Cloud Tasks(기록용 큐), 시간.
+- **외부 경계만 mock한다**: LLM(`ScriptedChatModel`·`RecordingChatModel`·`FakeProvider`), Redis(`fakeredis`), 검색(`SearchProvider` 스텁), Cloud Tasks(기록용 큐), 시간.
 - **내부 코드는 실제로 호출한다**: 라우터, 서비스, DB(테스트용 SQLite/Postgres). 동작 변경은 서비스를 직접 부르지 말고 HTTP API(`tests/conftest.py`의 `Harness`)로 테스트한다. 서킷 브레이커처럼 내부 동작 자체가 대상일 때만 예외다.
 
 ### 테스트가 실패하면
 1. 에러 메시지를 정확히 읽고 원인을 파악한다.
 2. 관련 변경을 diff로 확인한다.
-3. 스텁과 fake의 응답이 실제 인터페이스(`LLMProvider`, `SearchProvider`)와 맞는지 확인한다.
+3. 스텁과 fake의 응답이 실제 인터페이스(LangChain `BaseChatModel`, `LLMProvider`, `SearchProvider`)와 맞는지 확인한다.
 
 ### 에이전트 탐색 결과는 검증한다
 - 서브에이전트가 "없다", "적용 안 됨"이라고 보고한 것은 직접 파일을 읽어 확인한다. 부재 주장은 오탐이 잦다.

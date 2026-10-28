@@ -27,8 +27,8 @@ class AppContext:
     llm: LLMProvider
     quota: QuotaService
     history: HistoryCache
-    rag: RagPipeline | None
+    rag: RagPipeline
     suggestions: SuggestionService | None
     tasks: TaskQueue
-    chat_model: BaseChatModel | None = None  # the agent's answering model
-    agent: Any = None  # compiled LangGraph graph, when AGENT_ENABLED
+    chat_model: BaseChatModel  # the agent's answering model
+    agent: Any  # the compiled LangGraph graph

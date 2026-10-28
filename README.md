@@ -17,7 +17,7 @@ LLM 서비스를 운영할 때 실제로 부딪히는 문제(익명 사용자, �
 |---|---|
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Alembic, Pydantic v2 |
 | Data | PostgreSQL, Redis |
-| LLM | Anthropic Claude API (SSE 스트리밍, 구조화 출력), RAG(BM25), 테스트·로컬용 Fake provider |
+| LLM | LangGraph 에이전트, LangChain(Claude · 로컬 Qwen3 8B via Ollama), 구조화 출력, RAG(BM25), 테스트용 fake 모델 |
 | Frontend | React 18, TypeScript, Vite |
 | Infra | Cloud Run, Cloud SQL, Memorystore, Cloud Tasks, Secret Manager, GitHub Actions |
 
@@ -77,7 +77,7 @@ flowchart LR
 - 쿼터·rate limit 검사는 **스트림을 열기 전에** 끝내고, 초과하면 일반 HTTP 429로 응답합니다. 스트림 도중에는 상태 코드를 바꿀 수 없기 때문입니다.
 - 메시지 전송이 POST라서 `EventSource`를 쓸 수 없습니다. 그래서 `fetch` + `ReadableStream`으로 직접 파싱합니다. 네트워크 청크가 이벤트 중간이나 **한글 멀티바이트 문자 중간**에서 끊겨도 깨지지 않도록 `TextDecoder` 스트리밍 모드와 버퍼링을 사용합니다(단위 테스트 포함).
 - LLM 오류가 나거나 사용자가 중지하면, 그때까지 생성된 부분 응답을 저장하고 추정 토큰을 과금합니다. 연결을 끊어서 과금을 피하는 우회를 막기 위해서입니다.
-- LLM 호출은 `LLMProvider` 프로토콜 뒤에 있습니다. 실제 Claude API 대신 결정적인 `FakeProvider`를 끼울 수 있어서, API 키 없이도 로컬 실행과 테스트가 가능합니다.
+- 답변은 LangChain 채팅 모델(`build_chat_model`)이, 보조 호출은 `LLMProvider`가 맡습니다. 둘 다 결정적인 fake로 바꿀 수 있어서, API 키 없이도 로컬 실행과 테스트가 가능합니다.
 
 ### 4. 서버리스 환경의 비동기 처리
 [`app/services/tasks.py`](backend/app/services/tasks.py) · [`routers/internal.py`](backend/app/routers/internal.py)
@@ -126,7 +126,7 @@ flowchart LR
 - **가중 과금**: 쿼터가 입력과 출력 토큰을 같은 값으로 세면 실제 비용과 맞지 않습니다. 그래서 쿼터 단위를 "입력 토큰 환산값"으로 정하고 출력 5배, 캐시 쓰기 1.25배, 캐시 읽기 0.05배를 곱합니다(`claude-opus-5-5` 가격 기준, `TOKEN_WEIGHT_*`로 조정). 소수점은 올림하므로 전부 캐시된 응답도 최소 1토큰은 과금됩니다. 캐시가 적중하면 사용자 한도도 덜 줄어듭니다.
 - **고정 system 프롬프트**: 캐싱은 prefix가 일치해야 동작합니다. 처음에는 RAG 출처를 system 프롬프트 뒤에 붙였는데, 출처는 매 턴 달라지므로 그 뒤에 오는 대화 전체가 매번 캐시를 놓치는 구조였습니다. 출처를 **현재 user 턴의 `context`**로 옮기고 저장하거나 다시 보내지 않게 해서, 다음 요청의 앞부분이 이전 요청과 바이트 단위로 같게 만들었습니다.
 - **breakpoint 위치**: system 끝과 **현재 턴 직전 턴**에 둡니다. 현재 턴에 두면 다음 요청에서 다시 쓰이지 않는 출처까지 캐시에 쓰느라 1.25배 비용만 내게 됩니다. 직전 턴에 두면 다음 요청이 한 턴 뒤에 새로 캐시를 쓰고, lookback으로 이번 캐시를 찾아 이전 답변까지 캐시에서 읽습니다.
-- **검증**: Anthropic SDK를 메모리 안의 HTTP transport에 연결해 실제 요청 본문을 검사합니다. breakpoint 위치, 이전 요청과 prefix가 같은지, 응답 `usage`의 캐시 토큰이 과금까지 전달되는지를 확인합니다. API 키도 네트워크도 필요 없습니다.
+- **검증**: `ChatAnthropic`이 우리 메시지로 만드는 실제 요청 본문을 검사합니다. system과 직전 턴의 breakpoint, 현재 턴 출처가 다음 요청에 다시 실리지 않는지, 답변 모델의 서버측 refusal fallback 설정을 확인합니다. 응답 `usage`의 캐시 토큰이 과금까지 전달되는지는 `usage_from_message` 테스트로 확인합니다. API 키도 네트워크도 필요 없습니다.
 
 ### 10. 긴 대화 요약
 [`app/services/summary.py`](backend/app/services/summary.py) · 테스트 [`test_summary.py`](backend/tests/test_summary.py)
@@ -261,13 +261,13 @@ Redis가 없어도 서버는 동작합니다. 위의 장애 대응 경로가 그
 
 ```bash
 ollama pull qwen3:8b && ollama serve &          # 16GB Apple Silicon에서 동작
-LLM_PROVIDER=ollama AGENT_ENABLED=true uvicorn app.main:create_app --factory --reload
+LLM_PROVIDER=ollama uvicorn app.main:create_app --factory --reload
 ```
 
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 140개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 138개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 

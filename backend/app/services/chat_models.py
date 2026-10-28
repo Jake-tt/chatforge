@@ -36,10 +36,7 @@ from app.services.llm import (
     AUX_EFFORT,
     AUX_MAX_TOKENS,
     ChatTurn,
-    Completion,
     LLMError,
-    StreamEvent,
-    TextDelta,
     TextResult,
     Usage,
 )
@@ -181,26 +178,13 @@ def stop_reason_of(message: BaseMessage | None) -> str:
 
 
 class LangChainProvider:
-    """`LLMProvider` on LangChain chat models, so every caller of the existing interface
-    (RAG routing and compression, suggestions, titles, summaries) runs on any provider the
-    factory supports, including a local model."""
+    """`LLMProvider` on LangChain chat models, so the auxiliary calls (routing, source
+    compression, suggestions, titles, summaries) run on any provider the factory supports,
+    including a local model."""
 
     def __init__(self, main: BaseChatModel, aux: BaseChatModel):
         self._main = main
         self._aux = aux
-
-    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
-        full: AIMessageChunk | None = None
-        try:
-            async for chunk in self._main.astream(to_messages(system, turns)):
-                if chunk.text:
-                    yield TextDelta(chunk.text)
-                full = chunk if full is None else full + chunk
-        except Exception as exc:
-            raise LLMError(str(exc), retryable=True) from exc
-        used = usage_from_message(full) if full is not None else Usage()
-        yield Completion(used.input_tokens, used.output_tokens, stop_reason_of(full),
-                         used.cache_read_tokens, used.cache_write_tokens)
 
     async def complete(self, system: str, prompt: str) -> TextResult:
         try:

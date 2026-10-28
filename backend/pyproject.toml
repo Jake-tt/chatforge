@@ -18,7 +18,6 @@ dependencies = [
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
     "redis>=5.2",
-    "anthropic>=1.13",
     "langchain-core>=1.7",
     "langchain-anthropic>=1.7",
     "langchain-ollama>=1.1",

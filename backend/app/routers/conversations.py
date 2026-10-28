@@ -1,5 +1,4 @@
 import asyncio
-import dataclasses
 import json
 import logging
 import uuid
@@ -30,7 +29,7 @@ from app.schemas import (
 )
 from app.services import summary
 from app.services.history import HistoryEntry
-from app.services.llm import ChatTurn, Completion, LLMError, TextDelta, Usage
+from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
 from app.services.rag import PastSearch, account_snapshot
 from app.services.search import SearchHit
@@ -169,7 +168,7 @@ async def send_message(
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
                    is_first_message, account, past)
     return StreamingResponse(
-        _stream_agent_reply(job) if ctx.agent is not None else _stream_reply(job),
+        _stream_agent_reply(job),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -240,55 +239,8 @@ def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Us
     return aux + Usage(_estimate_tokens(prompt), _estimate_tokens(partial))
 
 
-async def _stream_reply(job: ReplyJob) -> AsyncIterator[str]:
-    ctx = job.ctx
-    turns = job.turns
-    parts: list[str] = []
-    completion: Completion | None = None
-    aux_usage = Usage()  # routing + source compression, charged with the answer
-    citations: list[dict] | None = None
-
-    try:
-        if ctx.rag is not None:
-            # Flush headers now; routing and search take a moment before the first token.
-            yield ": grounding\n\n"
-            result = await ctx.rag.ground(turns, account=job.account, past=job.past)
-            aux_usage = result.usage
-            if result.grounding is not None:
-                # With the current turn, not the system prompt: see ChatTurn.context.
-                turns = [*turns[:-1], dataclasses.replace(turns[-1],
-                                                          context=result.grounding.context)]
-                citations = [c.as_dict() for c in result.grounding.citations]
-                yield _sse("sources", {"citations": citations})
-
-        async with aclosing(ctx.llm.stream(job.system, turns)) as events:
-            async for event in events:
-                if isinstance(event, TextDelta):
-                    parts.append(event.text)
-                    yield _sse("delta", {"text": event.text})
-                else:
-                    completion = event
-    except LLMError as exc:
-        yield await _fail_reply(job, "".join(parts),
-                                _estimated_usage(job, turns, "".join(parts), aux_usage),
-                                citations, exc)
-        return
-    except (asyncio.CancelledError, GeneratorExit):
-        # Shielded so the write survives the cancellation of this request.
-        await asyncio.shield(_persist_reply(
-            job, "".join(parts), _estimated_usage(job, turns, "".join(parts), aux_usage),
-            citations))
-        raise
-
-    assert completion is not None, "provider must finish with a Completion"
-    async for event in _finish_reply(job, turns, "".join(parts),
-                                     aux_usage + Usage.of(completion), citations,
-                                     completion.stop_reason):
-        yield event
-
-
 async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
-    """The same SSE contract as `_stream_reply`, produced by the LangGraph agent.
+    """Answer one turn with the LangGraph agent, as SSE.
 
     `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
     events; this function only drives the graph, handles failure, and finishes the reply.
