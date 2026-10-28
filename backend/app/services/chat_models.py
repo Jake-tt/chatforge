@@ -20,12 +20,29 @@ from langchain_core.callbacks import (
     CallbackManagerForLLMRun,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_ollama import ChatOllama
+from pydantic import BaseModel
 
 from app.config import Settings
-from app.services.llm import AUX_EFFORT, AUX_MAX_TOKENS, Usage
+from app.services.llm import (
+    AUX_EFFORT,
+    AUX_MAX_TOKENS,
+    ChatTurn,
+    Completion,
+    LLMError,
+    StreamEvent,
+    TextDelta,
+    TextResult,
+    Usage,
+)
 
 Purpose = Literal["main", "aux"]  # main: the answering agent; aux: router, summaries
 
@@ -122,3 +139,65 @@ class EchoChatModel(BaseChatModel):
                 # Usage rides on the final chunk, as streaming providers report it.
                 usage_metadata=self._usage(messages, reply) if last else None,
             ))
+
+
+def to_messages(system: str, turns: list[ChatTurn]) -> list[BaseMessage]:
+    messages: list[BaseMessage] = [SystemMessage(system)]
+    for turn in turns:
+        if turn.role == "user":
+            # Per-request context (sources) rides on the current turn only; see ChatTurn.
+            text = f"{turn.context}\n\n{turn.content}" if turn.context else turn.content
+            messages.append(HumanMessage(text))
+        else:
+            messages.append(AIMessage(turn.content))
+    return messages
+
+
+def _stop_reason(message: BaseMessage | None) -> str:
+    meta = message.response_metadata if message is not None else {}
+    if meta.get("stop_reason"):
+        return meta["stop_reason"]
+    return "max_tokens" if meta.get("done_reason") == "length" else "end_turn"
+
+
+class LangChainProvider:
+    """`LLMProvider` on LangChain chat models, so every caller of the existing interface
+    (RAG routing and compression, suggestions, titles, summaries) runs on any provider the
+    factory supports, including a local model."""
+
+    def __init__(self, main: BaseChatModel, aux: BaseChatModel):
+        self._main = main
+        self._aux = aux
+
+    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
+        full: AIMessageChunk | None = None
+        try:
+            async for chunk in self._main.astream(to_messages(system, turns)):
+                if chunk.text:
+                    yield TextDelta(chunk.text)
+                full = chunk if full is None else full + chunk
+        except Exception as exc:
+            raise LLMError(str(exc), retryable=True) from exc
+        used = usage_from_message(full) if full is not None else Usage()
+        yield Completion(used.input_tokens, used.output_tokens, _stop_reason(full),
+                         used.cache_read_tokens, used.cache_write_tokens)
+
+    async def complete(self, system: str, prompt: str) -> TextResult:
+        try:
+            message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(prompt)])
+        except Exception as exc:
+            raise LLMError(str(exc), retryable=True) from exc
+        return TextResult(message.text.strip(), usage_from_message(message))
+
+    async def structured[M: BaseModel](
+        self, system: str, prompt: str, schema: type[M]
+    ) -> tuple[M, Usage]:
+        runnable = self._aux.with_structured_output(schema, include_raw=True)
+        try:
+            out = await runnable.ainvoke([SystemMessage(system), HumanMessage(prompt)])
+        except Exception as exc:
+            raise LLMError(str(exc), retryable=True) from exc
+        if out["parsed"] is None:
+            raise LLMError(f"no structured output ({out.get('parsing_error')})",
+                           retryable=False)
+        return out["parsed"], usage_from_message(out["raw"])

@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.services.chat_models import EchoChatModel, build_chat_model, usage_from_message
-from app.services.llm import AUX_MAX_TOKENS, Usage, build_provider
+from app.services.llm import AUX_MAX_TOKENS, Usage
 
 
 def _settings(**overrides) -> Settings:
@@ -138,12 +138,6 @@ async def test_fake_model_reports_usage_on_invoke_too():
 
     assert message.content == "(fake) You said: hello there"
     assert usage_from_message(message) == Usage(input_tokens=2, output_tokens=5)
-
-
-def test_the_legacy_provider_path_refuses_ollama():
-    # Only the agent graph speaks to Ollama; silently echoing would hide the misconfiguration.
-    with pytest.raises(ValueError, match="agent"):
-        build_provider(_settings(llm_provider="ollama"))
 
 
 @pytest.mark.parametrize("overrides, message", [
