@@ -44,7 +44,14 @@ class AgentStream:
 
     @property
     def partial(self) -> str:
+        """What the client saw: stored as the reply if the turn stops early."""
         return "".join(self.streamed)
+
+    @property
+    def generated(self) -> str:
+        """Everything the model wrote this turn, held-back text included: billed if the
+        turn stops early, even when none of it reached the client."""
+        return "".join(self.streamed + self._held)
 
     def on_message(self, chunk: object, meta: dict) -> list[Event]:
         if meta.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):

@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import ColumnElement, and_, select, update
+from sqlalchemy import ColumnElement, and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -34,6 +34,7 @@ from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
 from app.services.rag import PastSearch, account_snapshot
 from app.services.search import SearchHit
+from app.services.turn_gate import Lease
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +150,18 @@ async def send_message(
     if quota.exceeded:
         raise ApiError(429, "quota_exceeded", "Daily token limit reached")
 
+    lease = await ctx.turns.acquire(principal.subject, conversation.id)
+    try:
+        return await _start_turn(ctx, principal, conversation, body, quota, session, lease)
+    except BaseException:
+        await ctx.turns.release(lease)  # the stream never started, so it can't release
+        raise
+
+
+async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conversation,
+                      body: MessageCreate, quota, session: AsyncSession,
+                      lease: Lease) -> StreamingResponse:
+    settings = ctx.settings
     seq = await _allocate_seq(session, conversation.id)
     session.add(Message(conversation_id=conversation.id, seq=seq, role="user",
                         content=body.content))
@@ -167,12 +180,23 @@ async def send_message(
     past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
         else None
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
-                   is_first_message, account, past)
-    return StreamingResponse(
-        _stream_agent_reply(job),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+                   is_first_message, account, past, user_seq=seq, lease=lease)
+    return TurnResponse(job, TurnProgress())
+
+
+async def _undo_user_turn(session: AsyncSession, conversation_id: uuid.UUID, seq: int) -> None:
+    """Remove the turn's user message and give its seq back.
+
+    The count only moves back if it still ends at this message: the turn holds the
+    conversation's lock, so nothing should have come after it, and if something did
+    (the lock failed open) the seq is left as is rather than reused.
+    """
+    await session.execute(delete(Message).where(Message.conversation_id == conversation_id,
+                                                 Message.seq == seq))
+    await session.execute(update(Conversation)
+                          .where(Conversation.id == conversation_id,
+                                 Conversation.message_count == seq)
+                          .values(message_count=seq - 1))
 
 
 async def _allocate_seq(session: AsyncSession, conversation_id: uuid.UUID, **values) -> int:
@@ -231,6 +255,60 @@ class ReplyJob:
     is_first_message: bool
     account: SearchHit | None
     past: PastSearch | None
+    user_seq: int = 0  # the user message this turn answers; undone if nothing is shown
+    lease: Lease | None = None  # admission held for the turn, released when it ends
+
+
+# Writes that must outlive a cancelled request. `asyncio.shield` keeps no strong reference
+# to the task it shields, so a reference is held here until the write finishes.
+_UNFINISHED_WRITES: set[asyncio.Task] = set()
+
+
+async def _survive_cancellation(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _UNFINISHED_WRITES.add(task)
+    task.add_done_callback(_UNFINISHED_WRITES.discard)
+    await asyncio.shield(task)
+
+
+async def drain_unfinished_writes() -> None:
+    """Let in-flight saves finish before shutdown closes the database and Redis."""
+    if _UNFINISHED_WRITES:
+        await asyncio.wait(set(_UNFINISHED_WRITES))
+
+
+@dataclass
+class TurnProgress:
+    started: bool = False  # the reply generator ran, so its own cleanup will run
+
+
+class TurnResponse(StreamingResponse):
+    """A streamed reply that cleans up even if its body never starts.
+
+    Starlette sends the headers before it runs the body generator. If sending them fails,
+    or the client is gone first, the generator never starts, and a generator that never
+    started skips its `finally` when closed: the admission lease would stay held and the
+    stored user message would be left without a reply.
+    """
+
+    def __init__(self, job: ReplyJob, progress: TurnProgress):
+        super().__init__(_stream_agent_reply(job, progress), media_type="text/event-stream",
+                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        self._job = job
+        self._progress = progress
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self._progress.started:
+                await _survive_cancellation(_abandon(self._job))
+
+
+async def _abandon(job: ReplyJob) -> None:
+    await _persist_reply(job, "", Usage(), None)  # nothing was shown: undo the turn
+    if job.lease is not None:
+        await job.ctx.turns.release(job.lease)
 
 
 def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Usage) -> Usage:
@@ -240,12 +318,28 @@ def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Us
     return aux + Usage(_estimate_tokens(prompt), _estimate_tokens(partial))
 
 
-async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
+async def _stream_agent_reply(job: ReplyJob,
+                             progress: TurnProgress | None = None) -> AsyncIterator[str]:
     """Answer one turn with the LangGraph agent, as SSE.
 
     `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
     events; this function only drives the graph, handles failure, and finishes the reply.
     """
+    if progress is not None:
+        progress.started = True
+    try:
+        # aclosing: when the client goes away, closing this generator must close the inner
+        # one now, so its cancellation handler stores the partial reply before the lease
+        # is released (left to the garbage collector, it would run later, out of order).
+        async with aclosing(_run_agent(job)) as events:
+            async for event in events:
+                yield event
+    finally:
+        if job.lease is not None:
+            await _survive_cancellation(job.ctx.turns.release(job.lease))
+
+
+async def _run_agent(job: ReplyJob) -> AsyncIterator[str]:
     ctx = job.ctx
     stream = AgentStream(turns=job.turns)
     try:
@@ -273,15 +367,16 @@ async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
                 for name, data in events:
                     yield _sse(name, data)
     except (asyncio.CancelledError, GeneratorExit):
-        partial = stream.partial
-        await asyncio.shield(_persist_reply(
-            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+        # Store what the client saw; bill everything the model wrote.
+        await _survive_cancellation(_persist_reply(
+            job, stream.partial,
+            _estimated_usage(job, stream.turns, stream.generated, stream.usage),
             stream.citations or None))
         raise
     except Exception as exc:
-        partial = stream.partial
         yield await _fail_reply(
-            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            job, stream.partial,
+            _estimated_usage(job, stream.turns, stream.generated, stream.usage),
             stream.citations or None, _as_llm_error(exc))
         return
 
@@ -374,15 +469,20 @@ async def _persist_reply(
 ) -> uuid.UUID | None:
     """Store the assistant message and charge its tokens in one transaction.
 
-    With no text (failed or cancelled before the first token) only the tokens already
-    spent on routing/search are charged, and no empty message is stored.
+    With no text (the turn failed or was cancelled before anything reached the client)
+    the user message is undone, so the conversation is as before the turn: the same
+    question can be asked again, and still counts as the first message. Tokens already
+    spent are charged either way.
     """
     ctx, principal, conversation_id = job.ctx, job.principal, job.conversation_id
     billed = usage.billed(ctx.settings.token_weights())
-    if not text and not billed:
+    undo = not text and job.user_seq > 0
+    if not (text or billed or undo):
         return None
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
+        if undo:
+            await _undo_user_turn(session, conversation_id, job.user_seq)
         message = None
         if text:
             seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
@@ -396,6 +496,8 @@ async def _persist_reply(
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
     if message is None:
+        if undo:
+            await ctx.history.invalidate(principal.subject, conversation_id)
         return None
     await ctx.history.append(principal.subject, conversation_id,
                              HistoryEntry(message.seq, "assistant", text))

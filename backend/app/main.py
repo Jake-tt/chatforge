@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,6 +15,7 @@ from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, usage
+from app.routers.conversations import drain_unfinished_writes
 from app.services.chat_models import build_chat_model
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
@@ -22,6 +25,7 @@ from app.services.redis_guard import RedisGuard
 from app.services.search import BM25Search, SearchProvider, load_markdown_corpus
 from app.services.suggestions import SuggestionService
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
+from app.services.turn_gate import TurnGate
 
 
 def create_app(
@@ -62,12 +66,20 @@ def create_app(
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,
             tasks=queue,
+            # The lock outlives the turn timeout, so it only expires for a lost instance.
+            turns=TurnGate(guard, int(settings.agent_turn_timeout_seconds) + 60,
+                           settings.max_concurrent_streams),
             chat_model=chat_model or build_chat_model(settings, purpose="main"),
             agent=build_agent_graph(),
         )
         try:
             yield
         finally:
+            # Saves for cancelled requests first: they need the database and Redis below.
+            # Bounded, within Cloud Run's 10s grace period after SIGTERM.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(8.0):
+                    await drain_unfinished_writes()
             await queue.close()
             if redis is None:
                 await redis_client.aclose()
