@@ -130,10 +130,19 @@ class RagPipeline:
                      past: PastSearch | None = None) -> GroundingResult:
         """`account`: the user's plan and usage. `past`: searches their earlier
         conversations. Each is used only when the router asks for it."""
-        usage = Usage()
+        decision, route_usage, hybrid = await self.route(turns)
+        result = await self.gather(
+            decision.query.strip() or turns[-1].content,
+            search_help=decision.needs_search or hybrid,
+            account=account if decision.needs_account else None,
+            past=past if decision.needs_past else None,
+        )
+        return GroundingResult(result.grounding, route_usage + result.usage)
+
+    async def route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage, bool]:
+        """The router's decision, its tokens, and whether hybrid search applies."""
         started = time.perf_counter()
-        decision, route_usage = await self._route(turns)
-        usage += route_usage
+        decision, usage = await self._route(turns)
         user_turns = sum(t.role == "user" for t in turns)
         hybrid = user_turns >= self._s.search_after_turns and bool(decision.query.strip())
         log.info("rag route", extra={
@@ -141,27 +150,30 @@ class RagPipeline:
             "needs_past": decision.needs_past, "hybrid": hybrid, "query": decision.query,
             "router_ms": round((time.perf_counter() - started) * 1000),
         })
-        query = decision.query.strip() or turns[-1].content
-        pinned = [account] if decision.needs_account and account is not None else []
+        return decision, usage, hybrid
+
+    async def gather(self, query: str, *, search_help: bool, account: SearchHit | None,
+                     past: PastSearch | None) -> GroundingResult:
+        """Run the selected sources concurrently and build the grounding for one turn."""
+        pinned = [account] if account is not None else []
         sources: list[SourceSpec] = []
-        if decision.needs_search or hybrid:
+        if search_help:
             sources.append(SourceSpec(
                 "help", lambda: self._search.search(query, self._s.search_top_k),
                 self._s.search_timeout_seconds))
-        if decision.needs_past and past is not None:
+        if past is not None:
             sources.append(SourceSpec("past", lambda: past(query),
                                       self._s.search_timeout_seconds))
         searched = await self._retrieve(sources) if sources else []
         if not (pinned or searched):
-            return GroundingResult(None, usage)
+            return GroundingResult(None, Usage())
 
         citations = [Citation(i, h.title, h.url, h.text)
                      for i, h in enumerate([*pinned, *searched], start=1)]
         # Pinned facts (the user's own figures) are sent verbatim; only search results are
         # compressed, since a summary may reword a number or drop a source.
-        searched_body, compressed, compress_usage = await self._searched_body(
+        searched_body, compressed, usage = await self._searched_body(
             query, citations[len(pinned):])
-        usage += compress_usage
         body = "\n\n".join(b for b in (_render(citations[:len(pinned)]), searched_body) if b)
         return GroundingResult(
             Grounding(citations, GROUNDING_TEMPLATE.format(body=body), compressed), usage
