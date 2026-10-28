@@ -18,6 +18,8 @@ dependencies = [
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
     "redis>=5.2",
+    # Not imported directly, but the answering model's `fallbacks` parameter needs it:
+    # langchain-anthropic alone would allow an SDK that predates it.
     "anthropic>=1.13",
     "langchain-core>=1.7",
     "langchain-anthropic>=1.7",
