@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.language_models import BaseChatModel
 from redis.asyncio import Redis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from sqlalchemy import text
 
 from app.agent.graph import build_agent_graph
@@ -28,6 +30,19 @@ from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 from app.services.turn_gate import TurnGate
 
 
+def build_redis(settings: Settings) -> Redis:
+    # redis-py 8 defaults to a 5 s socket timeout: a hung Redis would add that to every
+    # request in flight before the breaker opens, and again to each one after a cooldown.
+    return Redis.from_url(
+        settings.redis_url, decode_responses=True,
+        socket_connect_timeout=settings.redis_connect_timeout_seconds,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        # Explicit, because `Redis(...)` (unlike `from_url`) retries 10 times by default:
+        # each retry would add another timeout. The breaker is the retry policy.
+        retry=Retry(NoBackoff(), 0),
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -44,13 +59,14 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         engine = create_engine(settings.database_url)
-        redis_client = redis or Redis.from_url(settings.redis_url, decode_responses=True)
+        redis_client = redis or build_redis(settings)
         queue: TaskQueue = tasks or (
             CloudTasksQueue(settings)
             if settings.task_backend == "cloudtasks"
             else InlineTaskQueue(lambda: app.state.ctx)
         )
-        guard = RedisGuard(redis_client)
+        guard = RedisGuard(redis_client, failure_threshold=settings.redis_failure_threshold,
+                           cooldown_seconds=settings.redis_cooldown_seconds)
         provider = llm or build_provider(settings)
         rag = _build_rag(settings, provider, search)
         app.state.ctx = AppContext(
