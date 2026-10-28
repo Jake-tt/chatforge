@@ -68,13 +68,16 @@ class Tool:
 
 def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
                 past: PastSearch | None) -> list[Tool]:
-    async def search_help(query: str) -> ToolOutput:
-        async with asyncio.timeout(settings.search_timeout_seconds):
-            return ToolOutput.of(await rag.search.search(query, settings.search_top_k))
+    tools: list[Tool] = []
+    help_center = rag.search
+    if help_center is not None:
+        async def search_help(query: str) -> ToolOutput:
+            async with asyncio.timeout(settings.search_timeout_seconds):
+                return ToolOutput.of(await help_center.search(query, settings.search_top_k))
 
-    tools = [Tool("search_help", "Search the Chatforge help center: plans and daily token "
-                  "limits, accounts and login, guest chats, deleting conversations, privacy.",
-                  QueryArgs, search_help)]
+        tools.append(Tool("search_help", "Search the Chatforge help center: plans and daily "
+                          "token limits, accounts and login, guest chats, deleting "
+                          "conversations, privacy.", QueryArgs, search_help))
 
     if past is not None:
         async def search_past(query: str) -> ToolOutput:

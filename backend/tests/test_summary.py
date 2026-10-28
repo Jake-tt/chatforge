@@ -1,15 +1,22 @@
 """Rolling conversation summary: older turns are replaced by a summary in the context."""
 
 import asyncio
-from collections.abc import AsyncIterator
 
+from langchain_core.messages import AIMessage
+
+from app.agent.graph import TOOLS_NOTE
 from app.routers.internal import verify_task_caller
-from app.services.llm import ChatTurn, Completion, StreamEvent, TextDelta, TextResult, Usage
+from app.services.llm import TextResult, Usage
+from tests.fakes import RecordingChatModel, usage
 from tests.test_internal_tasks import RecordingQueue
 
 
 class ScriptedProvider:
-    """Replies from a script, records what each call was sent, and fakes the summarizer."""
+    """Fakes the summarizer; the answers come from `answers`, which records each call.
+
+    Routing uses the schemas' deterministic `fake` and spends no tokens, so billing
+    assertions see the summary alone.
+    """
 
     def __init__(self, replies: list[str] | None = None, summary: str = "SUMMARY",
                  summary_delay: float = 0.0, summary_error: bool = False):
@@ -17,16 +24,12 @@ class ScriptedProvider:
         self._summary = summary
         self._summary_delay = summary_delay
         self._summary_error = summary_error
-        self.systems: list[str] = []
-        self.calls: list[list[ChatTurn]] = []
+        self.answers = RecordingChatModel(
+            script=[AIMessage(r, usage_metadata=usage(1, 1)) for r in self._replies])
         self.summary_prompts: list[str] = []
 
-    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
-        self.systems.append(system)
-        self.calls.append(turns)
-        n = len(self.calls)
-        yield TextDelta(self._replies[n - 1] if n <= len(self._replies) else f"reply {n}")
-        yield Completion(input_tokens=1, output_tokens=1, stop_reason="end_turn")
+    async def structured(self, system, prompt, schema):
+        return schema.fake(prompt), Usage()
 
     async def complete(self, system: str, prompt: str) -> TextResult:
         if "summary" not in system.lower():
@@ -49,7 +52,7 @@ async def _chat_turns(h, headers, cid, *messages: str) -> None:
 
 async def test_older_turns_are_replaced_by_the_summary(make_harness):
     llm = ScriptedProvider(summary="사용자는 부산 여행을 계획 중이다.")
-    h = await make_harness(llm=llm, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
@@ -59,8 +62,8 @@ async def test_older_turns_are_replaced_by_the_summary(make_harness):
 
     assert "one" in llm.summary_prompts[0] and "reply 2" in llm.summary_prompts[0]
     assert "three" not in llm.summary_prompts[0]
-    assert "사용자는 부산 여행을 계획 중이다." in llm.systems[-1]
-    assert [(t.role, t.content) for t in llm.calls[-1]] == [
+    assert "사용자는 부산 여행을 계획 중이다." in llm.answers.systems[-1]
+    assert llm.answers.turns() == [
         ("user", "three"), ("assistant", "reply 3"), ("user", "four"),
     ]
 
@@ -70,7 +73,7 @@ async def test_a_pending_clarifying_question_is_never_summarized_away(make_harne
     # user what they meant dropped the original question, so the user's answer ("프로")
     # reached the model with nothing left to answer.
     llm = ScriptedProvider(replies=["안녕하세요", "네", "어느 요금제로 바꾸시겠어요?"])
-    h = await make_harness(llm=llm, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
@@ -79,39 +82,42 @@ async def test_a_pending_clarifying_question_is_never_summarized_away(make_harne
 
     assert llm.summary_prompts, "summary should have run"
     assert "어느 요금제로" not in llm.summary_prompts[0]
-    assert [t.content for t in llm.calls[-1]] == [
+    assert llm.answers.contents() == [
         "요금제를 바꾸고 싶어", "어느 요금제로 바꾸시겠어요?", "프로",
     ]
 
 
 async def test_summarizer_failure_keeps_the_full_history(make_harness):
     llm = ScriptedProvider(summary_error=True)
-    h = await make_harness(llm=llm, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
     await _chat_turns(h, headers, cid, "one", "two", "three", "four")
 
-    assert llm.systems[-1] == h.ctx.settings.system_prompt
-    assert [t.content for t in llm.calls[-1]][:2] == ["one", "reply 1"]
+    assert llm.answers.systems[-1] == h.ctx.settings.system_prompt + TOOLS_NOTE
+    assert llm.answers.contents()[:2] == ["one", "reply 1"]
 
 
 async def test_an_overlong_summary_is_discarded(make_harness):
     llm = ScriptedProvider(summary="x" * 500)
-    h = await make_harness(llm=llm, conversation_summary_char_limit=100, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, conversation_summary_char_limit=100,
+                           **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
     await _chat_turns(h, headers, cid, "one", "two", "three", "four")
 
-    assert llm.summary_prompts and "xxx" not in llm.systems[-1]
-    assert llm.calls[-1][0].content == "one"
+    assert llm.summary_prompts
+    assert llm.answers.systems[-1] == h.ctx.settings.system_prompt + TOOLS_NOTE
+    assert llm.answers.contents()[0] == "one"
 
 
 async def test_summary_tokens_are_charged_once_despite_duplicate_delivery(make_harness):
     queue = RecordingQueue()
     llm = ScriptedProvider(summary_delay=0.05)
-    h = await make_harness(llm=llm, task_backend="cloudtasks", tasks=queue, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, task_backend="cloudtasks",
+                           tasks=queue, **SUMMARY_ON)
     h.app.dependency_overrides[verify_task_caller] = lambda: None
     headers = await h.guest()
     cid = await h.new_conversation(headers)
@@ -133,7 +139,8 @@ async def test_summary_tokens_are_charged_once_despite_duplicate_delivery(make_h
 
 async def test_short_conversations_are_not_summarized(make_harness):
     queue = RecordingQueue()
-    h = await make_harness(llm=ScriptedProvider(), task_backend="cloudtasks", tasks=queue,
+    h = await make_harness(llm=(llm := ScriptedProvider()), chat_model=llm.answers,
+                           task_backend="cloudtasks", tasks=queue,
                            **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
@@ -152,7 +159,8 @@ class FailingQueue(RecordingQueue):
 
 
 async def test_failing_to_enqueue_the_summary_still_finishes_the_reply(make_harness):
-    h = await make_harness(llm=ScriptedProvider(), task_backend="cloudtasks",
+    h = await make_harness(llm=(llm := ScriptedProvider()), chat_model=llm.answers,
+                           task_backend="cloudtasks",
                            tasks=FailingQueue(), **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
@@ -168,7 +176,7 @@ async def test_a_long_backlog_is_summarized_in_bounded_batches(make_harness):
     # Conversations from before summaries existed start at boundary 0. One run must not
     # try to fold all of them at once; later runs continue from the new boundary.
     llm = ScriptedProvider()
-    h = await make_harness(llm=llm, summary_batch_messages=4, **SUMMARY_ON)
+    h = await make_harness(llm=llm, chat_model=llm.answers, summary_batch_messages=4, **SUMMARY_ON)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 

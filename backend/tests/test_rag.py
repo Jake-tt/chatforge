@@ -1,12 +1,13 @@
 """Help-center RAG: routing, hybrid search, citations and their fallbacks."""
 
 import asyncio
-from collections.abc import AsyncIterator
 from pathlib import Path
 
+from app.agent.graph import ROUTE_FAILED_NOTE, TOOLS_NOTE
 from app.config import Settings
-from app.services.llm import ChatTurn, FakeProvider, LLMError, StreamEvent, TextResult, Usage
+from app.services.llm import FakeProvider, LLMError, TextResult, Usage
 from app.services.search import BM25Search, load_markdown_corpus, tokenize
+from tests.fakes import RecordingChatModel
 
 KNOWLEDGE = Path(Settings().knowledge_dir)
 
@@ -28,34 +29,31 @@ async def test_bm25_finds_the_right_help_section():
 
 
 class SpyProvider(FakeProvider):
-    """FakeProvider that records what it was sent and lets tests script the aux calls."""
+    """FakeProvider for the aux calls (router, compression) plus a recording answer model.
+
+    What the answering agent was sent is read from `answers`; `contexts` is a shorthand
+    for its current turns.
+    """
 
     def __init__(self, summary: str | None = None, router_delay: float = 0.0,
                  router_error: bool = False):
         super().__init__()
-        self.systems: list[str] = []
-        self.calls: list[list[ChatTurn]] = []
+        self.answers = RecordingChatModel()
         self.compress_prompts: list[str] = []
         self._summary = summary
         self._router_delay = router_delay
         self._router_error = router_error
 
-    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
-        self.systems.append(system)
-        self.calls.append(turns)
-        async for event in super().stream(system, turns):
-            yield event
+    @property
+    def contexts(self) -> list[str]:
+        """The current user turn of each answer, with any attached sources."""
+        return self.answers.current_turns
 
     async def structured(self, system, prompt, schema):
         if self._router_error:
             raise LLMError("router down", retryable=True)
         await asyncio.sleep(self._router_delay)
         return await super().structured(system, prompt, schema)
-
-    @property
-    def contexts(self) -> list[str]:
-        """Grounding sent with the current user turn of each call ("" when none)."""
-        return [turns[-1].context for turns in self.calls]
 
     async def complete(self, system: str, prompt: str) -> TextResult:
         self.compress_prompts.append(prompt)
@@ -66,7 +64,7 @@ class SpyProvider(FakeProvider):
 
 async def _rag_harness(make_harness, llm=None, **settings):
     llm = llm or SpyProvider()
-    h = await make_harness(llm=llm, rag_enabled=True, **settings)
+    h = await make_harness(llm=llm, chat_model=llm.answers, rag_enabled=True, **settings)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
     return h, llm, headers, cid
@@ -99,12 +97,13 @@ async def test_sources_ride_on_the_current_turn_and_the_system_prompt_stays_froz
     await h.chat(headers, cid, "무료 요금제 하루 토큰 한도가 얼마야?")
     await h.chat(headers, cid, "비밀번호는 몇 자 이상이어야 해?")
 
-    assert llm.systems == [h.ctx.settings.system_prompt] * 2
-    first, second = llm.calls
-    assert "<sources>" in first[-1].context and "<sources>" in second[-1].context
+    # Exactly the base prompt plus the agent's tool note, identical on both turns.
+    assert llm.answers.systems == [h.ctx.settings.system_prompt + TOOLS_NOTE] * 2
+    assert all("<sources>" in turn for turn in llm.contexts)
     # History is replayed as stored: earlier turns carry no sources.
-    assert [t.context for t in second[:-1]] == ["", ""]
-    assert second[0].content == "무료 요금제 하루 토큰 한도가 얼마야?"
+    earlier = llm.answers.contents(1)[:-1]
+    assert earlier[0] == "무료 요금제 하루 토큰 한도가 얼마야?"
+    assert not any("<sources>" in text for text in earlier)
 
 
 async def test_small_talk_skips_search(make_harness):
@@ -116,15 +115,17 @@ async def test_small_talk_skips_search(make_harness):
     assert "<sources>" not in llm.contexts[-1]
 
 
-async def test_router_timeout_answers_without_search(make_harness):
+async def test_router_timeout_hands_the_turn_to_the_agent(make_harness):
+    # No prefetch; the agent answers and may still search with its tools.
     llm = SpyProvider(router_delay=1.0)
     h, _, headers, cid = await _rag_harness(make_harness, llm=llm, router_timeout_seconds=0.05)
 
     result = await h.chat(headers, cid, "토큰 한도가 얼마야?")
 
     assert result.response.status_code == 200
-    assert result.text.startswith("(fake)")
+    assert result.text == "reply 1"
     assert "<sources>" not in llm.contexts[-1]
+    assert ROUTE_FAILED_NOTE in llm.contexts[-1]
 
 
 async def test_router_failure_answers_without_search(make_harness):

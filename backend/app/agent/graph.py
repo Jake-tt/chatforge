@@ -24,6 +24,7 @@ import asyncio
 import dataclasses
 import logging
 import operator
+import time
 from dataclasses import dataclass
 from typing import Annotated, Literal, TypedDict
 
@@ -137,8 +138,15 @@ def plan_sources(route: AgentRoute, turns: list[ChatTurn], ctx: AgentContext) ->
 
 async def router(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     ctx = runtime.context
+    started = time.perf_counter()
     route, used = await ctx.rag.classify(state["turns"], AGENT_ROUTER_SYSTEM, AgentRoute)
     plan = plan_sources(route, state["turns"], ctx) if route is not None else None
+    log.info("agent route", extra={
+        "routed": route is not None,
+        "clarify": bool(route and route.needs_clarification),
+        "plan": dataclasses.asdict(plan) if plan else None,
+        "router_ms": round((time.perf_counter() - started) * 1000),
+    })
     return {"route": route, "plan": plan, "usage": used}
 
 

@@ -24,6 +24,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://chatforge:chatforge@postgres:5432/chatforge
       REDIS_URL: redis://redis:6379/0
       LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      AGENT_ENABLED: ${AGENT_ENABLED:-true}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       postgres: { condition: service_healthy }

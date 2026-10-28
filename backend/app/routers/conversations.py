@@ -298,18 +298,27 @@ async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
     try:
         # Flush headers now; routing and lookups take a moment before the first token.
         yield ": routing\n\n"
-        async for mode, payload in ctx.agent.astream(
+        # The deadline guards only the waits on the graph, never a `yield`: a timeout
+        # firing while the client is being written to would cancel the whole request.
+        deadline = asyncio.get_running_loop().time() + ctx.settings.agent_turn_timeout_seconds
+        async with aclosing(ctx.agent.astream(
             {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
              "usage": Usage()},
             context=_agent_context(job), stream_mode=["messages", "updates"],
-        ):
-            if mode == "messages":
-                events = stream.on_message(*payload)
-            else:
-                events = [e for update in payload.values() if update
-                          for e in stream.on_update(update)]
-            for name, data in events:
-                yield _sse(name, data)
+        )) as graph_events:
+            while True:
+                async with asyncio.timeout_at(deadline):
+                    try:
+                        mode, payload = await anext(graph_events)
+                    except StopAsyncIteration:
+                        break
+                if mode == "messages":
+                    events = stream.on_message(*payload)
+                else:
+                    events = [e for update in payload.values() if update
+                              for e in stream.on_update(update)]
+                for name, data in events:
+                    yield _sse(name, data)
     except (asyncio.CancelledError, GeneratorExit):
         partial = stream.partial
         await asyncio.shield(_persist_reply(

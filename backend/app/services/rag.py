@@ -121,7 +121,9 @@ class GroundingResult:
 
 
 class RagPipeline:
-    def __init__(self, llm: LLMProvider, search: SearchProvider, settings: Settings):
+    def __init__(self, llm: LLMProvider, search: SearchProvider | None, settings: Settings):
+        """`search` is None when there is no help center (RAG_ENABLED off or no documents):
+        routing and the user's own sources still work, only help search is skipped."""
         self._llm = llm
         self._search = search
         self._s = settings
@@ -140,7 +142,7 @@ class RagPipeline:
         return GroundingResult(result.grounding, route_usage + result.usage)
 
     @property
-    def search(self) -> SearchProvider:
+    def search(self) -> SearchProvider | None:
         return self._search
 
     def hybrid(self, turns: list[ChatTurn], query: str) -> bool:
@@ -182,7 +184,7 @@ class RagPipeline:
         """Run the selected sources concurrently and build the grounding for one turn."""
         pinned = [account] if account is not None else []
         sources: list[SourceSpec] = []
-        if search_help:
+        if search_help and self._search is not None:
             sources.append(SourceSpec(
                 "help", lambda: self._search.search(query, self._s.search_top_k),
                 self._s.search_timeout_seconds))

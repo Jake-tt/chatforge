@@ -1,14 +1,7 @@
-from collections.abc import AsyncIterator
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 
-from app.services.llm import (
-    ChatTurn,
-    Completion,
-    LLMError,
-    StreamEvent,
-    TextDelta,
-    TextResult,
-    Usage,
-)
+from tests.fakes import RecordingChatModel, ScriptedChatModel
 
 
 async def test_stream_reply_is_persisted_and_charged(h):
@@ -21,7 +14,8 @@ async def test_stream_reply_is_persisted_and_charged(h):
     assert result.text == "(fake) You said: hello there"
     done = result.last("done")
     assert done["stop_reason"] == "end_turn"
-    assert done["output_tokens"] == 5
+    # 5 answer words + 5 from the fake router's structured call.
+    assert done["output_tokens"] == 10
 
     detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
     assert [(m["role"], m["content"]) for m in detail["messages"]] == [
@@ -45,22 +39,9 @@ async def test_first_message_triggers_background_title(h):
     assert detail["title"] == "I bake sourdough bread at home"
 
 
-class RecordingProvider:
-    def __init__(self):
-        self.calls: list[list[ChatTurn]] = []
-
-    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
-        self.calls.append(turns)
-        yield TextDelta(f"reply {len(self.calls)}")
-        yield Completion(input_tokens=1, output_tokens=1, stop_reason="end_turn")
-
-    async def complete(self, system: str, prompt: str) -> TextResult:
-        return TextResult("title", Usage())
-
-
 async def test_history_is_sent_and_windowed(make_harness):
-    llm = RecordingProvider()
-    h = await make_harness(llm=llm, history_limit=4)
+    llm = RecordingChatModel()
+    h = await make_harness(chat_model=llm, history_limit=4)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
@@ -68,11 +49,9 @@ async def test_history_is_sent_and_windowed(make_harness):
     await h.chat(headers, cid, "two")
     await h.chat(headers, cid, "three")
 
-    assert [t.content for t in llm.calls[1]] == ["one", "reply 1", "two"]
+    assert llm.contents(1) == ["one", "reply 1", "two"]
     # The last 4 messages start with "reply 1"; it is trimmed so a user turn leads.
-    assert [(t.role, t.content) for t in llm.calls[2]] == [
-        ("user", "two"), ("assistant", "reply 2"), ("user", "three"),
-    ]
+    assert llm.turns(2) == [("user", "two"), ("assistant", "reply 2"), ("user", "three")]
 
 
 async def test_conversations_are_isolated_between_owners(h):
@@ -117,27 +96,27 @@ async def test_per_minute_rate_limit(make_harness):
     assert r.headers["retry-after"] == "60"
 
 
-class FailingMidStream:
-    async def stream(self, system: str, turns: list[ChatTurn]) -> AsyncIterator[StreamEvent]:
-        yield TextDelta("partial answer ")
-        raise LLMError("upstream overloaded", retryable=True)
+PARTIAL = "partial answer " * 8  # past the agent's holdback, so the client saw it
 
-    async def complete(self, system: str, prompt: str) -> TextResult:
-        return TextResult("", Usage())
+
+class FailingMidStream(ScriptedChatModel):
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        yield ChatGenerationChunk(message=AIMessageChunk(content=PARTIAL))
+        raise ConnectionError("upstream overloaded")
 
 
 async def test_llm_failure_mid_stream_keeps_partial_and_charges_estimate(make_harness):
-    h = await make_harness(llm=FailingMidStream())
+    h = await make_harness(chat_model=FailingMidStream())
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 
     result = await h.chat(headers, cid, "question")
 
-    assert result.text == "partial answer "
+    assert result.text == PARTIAL
     assert result.last("error") == {
         "code": "llm_unavailable", "message": "The model is unavailable, please retry",
         "retryable": True,
     }
     detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
-    assert detail["messages"][-1]["content"] == "partial answer "
+    assert detail["messages"][-1]["content"] == PARTIAL
     assert (await h.client.get("/usage", headers=headers)).json()["used"] > 0
