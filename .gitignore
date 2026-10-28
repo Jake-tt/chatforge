@@ -24,3 +24,5 @@ Thumbs.db
 
 # personal file
 plan/*
+# Evaluation datasets: downloaded at run time, publishers' licenses
+backend/evals/data/
