@@ -80,7 +80,7 @@ export default function ChatPanel(props: Props) {
         content,
         {
           onDelta: (delta) => {
-            received = true;
+            if (delta) received = true;
             updateLast((b) => ({ ...b, content: b.content + delta }));
           },
           onSources: (citations) => updateLast((b) => ({ ...b, citations })),
@@ -102,7 +102,8 @@ export default function ChatPanel(props: Props) {
         // Nothing arrived, so the server undid the whole turn (the user message too):
         // do the same here and put the question back to resend.
         setBubbles((prev) => prev.slice(0, -2));
-        setInput(content);
+        // Keep anything typed meanwhile; otherwise offer the question again.
+        setInput((current) => (current.trim() ? current : content));
       }
       if (controller.signal.aborted) return;
       const apiErr = err instanceof ApiError ? err : null;

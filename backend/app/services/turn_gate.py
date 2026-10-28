@@ -5,16 +5,23 @@
   turn timeout, so a crashed instance can't hold it forever); a concurrent turn gets 409.
 - Per user: the daily quota is checked when a turn starts and charged when it ends, so
   parallel turns could each pass the check. Capping concurrent turns bounds that overrun.
+  Each running turn is a member of a sorted set scored by its start time. A turn whose
+  instance crashed never removes itself, so members older than the TTL are dropped on
+  every admission: a plain counter re-armed by each new turn would keep a leaked slot
+  forever for a user who keeps chatting. Releasing removes only the turn's own member,
+  so a turn admitted while Redis was down can't free someone else's slot.
 
 Both live in Redis behind `RedisGuard` and fail open when it is down, like the per-minute
 rate limit: the guarantees above need Redis; the chat does not.
 """
 
 import secrets
+import time
 import uuid
 from dataclasses import dataclass
 
 from redis.asyncio import Redis
+from redis.exceptions import WatchError
 
 from app.errors import ApiError
 from app.services.redis_guard import RedisGuard
@@ -41,25 +48,34 @@ class TurnGate:
             raise ApiError(409, "stream_in_progress",
                            "A reply is still being written in this conversation")
 
-        async def count(r: Redis) -> int:
+        async def admit(r: Redis) -> int:
+            now = time.time()
             async with r.pipeline(transaction=True) as pipe:
-                pipe.incr(lease.streams_key)
+                pipe.zremrangebyscore(lease.streams_key, "-inf", now - self._ttl)
+                pipe.zadd(lease.streams_key, {lease.token: now})
+                pipe.zcard(lease.streams_key)
                 pipe.expire(lease.streams_key, self._ttl)
-                running, _ = await pipe.execute()
+                _, _, running, _ = await pipe.execute()
             return running
 
-        if await self._guard.call(count, 0) > self._max_streams:
+        if await self._guard.call(admit, 0) > self._max_streams:
             await self.release(lease)
             raise ApiError(429, "too_many_streams", "Too many replies in progress")
         return lease
 
     async def release(self, lease: Lease) -> None:
         async def op(r: Redis) -> None:
+            await r.zrem(lease.streams_key, lease.token)
             # Delete the lock only if it is still ours: after a TTL expiry another turn may
-            # hold it. (GET then DEL is not atomic, but only an expired lease could race.)
-            if await r.get(lease.lock_key) == lease.token:
-                await r.delete(lease.lock_key)
-            if await r.decr(lease.streams_key) <= 0:
-                await r.delete(lease.streams_key)
+            # hold it. WATCH makes the check and the delete one step.
+            async with r.pipeline(transaction=True) as pipe:
+                try:
+                    await pipe.watch(lease.lock_key)
+                    if await pipe.get(lease.lock_key) == lease.token:
+                        pipe.multi()
+                        pipe.delete(lease.lock_key)
+                        await pipe.execute()
+                except WatchError:
+                    pass  # it changed hands meanwhile, so it isn't ours to delete
 
         await self._guard.call(op, None)

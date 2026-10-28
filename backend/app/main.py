@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -13,6 +15,7 @@ from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, usage
+from app.routers.conversations import drain_unfinished_writes
 from app.services.chat_models import build_chat_model
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
@@ -72,6 +75,11 @@ def create_app(
         try:
             yield
         finally:
+            # Saves for cancelled requests first: they need the database and Redis below.
+            # Bounded, within Cloud Run's 10s grace period after SIGTERM.
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(8.0):
+                    await drain_unfinished_writes()
             await queue.close()
             if redis is None:
                 await redis_client.aclose()

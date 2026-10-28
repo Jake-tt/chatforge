@@ -181,11 +181,7 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
         else None
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
                    is_first_message, account, past, user_seq=seq, lease=lease)
-    return StreamingResponse(
-        _stream_agent_reply(job),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    return TurnResponse(job, TurnProgress())
 
 
 async def _undo_user_turn(session: AsyncSession, conversation_id: uuid.UUID, seq: int) -> None:
@@ -275,6 +271,46 @@ async def _survive_cancellation(coro) -> None:
     await asyncio.shield(task)
 
 
+async def drain_unfinished_writes() -> None:
+    """Let in-flight saves finish before shutdown closes the database and Redis."""
+    if _UNFINISHED_WRITES:
+        await asyncio.wait(set(_UNFINISHED_WRITES))
+
+
+@dataclass
+class TurnProgress:
+    started: bool = False  # the reply generator ran, so its own cleanup will run
+
+
+class TurnResponse(StreamingResponse):
+    """A streamed reply that cleans up even if its body never starts.
+
+    Starlette sends the headers before it runs the body generator. If sending them fails,
+    or the client is gone first, the generator never starts, and a generator that never
+    started skips its `finally` when closed: the admission lease would stay held and the
+    stored user message would be left without a reply.
+    """
+
+    def __init__(self, job: ReplyJob, progress: TurnProgress):
+        super().__init__(_stream_agent_reply(job, progress), media_type="text/event-stream",
+                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        self._job = job
+        self._progress = progress
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self._progress.started:
+                await _survive_cancellation(_abandon(self._job))
+
+
+async def _abandon(job: ReplyJob) -> None:
+    await _persist_reply(job, "", Usage(), None)  # nothing was shown: undo the turn
+    if job.lease is not None:
+        await job.ctx.turns.release(job.lease)
+
+
 def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Usage) -> Usage:
     # Aborted streams don't report final usage; charge an estimate so that disconnecting
     # mid-reply can't be used to dodge the quota.
@@ -282,15 +318,19 @@ def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Us
     return aux + Usage(_estimate_tokens(prompt), _estimate_tokens(partial))
 
 
-async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
+async def _stream_agent_reply(job: ReplyJob,
+                             progress: TurnProgress | None = None) -> AsyncIterator[str]:
     """Answer one turn with the LangGraph agent, as SSE.
 
     `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
     events; this function only drives the graph, handles failure, and finishes the reply.
     """
+    if progress is not None:
+        progress.started = True
     try:
         # aclosing: when the client goes away, closing this generator must close the inner
-        # one too, so its cancellation handler stores the partial reply.
+        # one now, so its cancellation handler stores the partial reply before the lease
+        # is released (left to the garbage collector, it would run later, out of order).
         async with aclosing(_run_agent(job)) as events:
             async for event in events:
                 yield event
@@ -436,9 +476,12 @@ async def _persist_reply(
     """
     ctx, principal, conversation_id = job.ctx, job.principal, job.conversation_id
     billed = usage.billed(ctx.settings.token_weights())
+    undo = not text and job.user_seq > 0
+    if not (text or billed or undo):
+        return None
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
-        if not text and job.user_seq:
+        if undo:
             await _undo_user_turn(session, conversation_id, job.user_seq)
         message = None
         if text:
@@ -453,7 +496,7 @@ async def _persist_reply(
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
     if message is None:
-        if job.user_seq:
+        if undo:
             await ctx.history.invalidate(principal.subject, conversation_id)
         return None
     await ctx.history.append(principal.subject, conversation_id,
