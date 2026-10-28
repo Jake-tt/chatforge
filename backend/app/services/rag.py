@@ -139,12 +139,34 @@ class RagPipeline:
         )
         return GroundingResult(result.grounding, route_usage + result.usage)
 
+    @property
+    def search(self) -> SearchProvider:
+        return self._search
+
+    def hybrid(self, turns: list[ChatTurn], query: str) -> bool:
+        """From the Nth user turn on, search whenever a query exists (see module doc)."""
+        user_turns = sum(t.role == "user" for t in turns)
+        return user_turns >= self._s.search_after_turns and bool(query.strip())
+
+    async def classify[M: RouteDecision](self, turns: list[ChatTurn], system: str,
+                                         schema: type[M]) -> tuple[M | None, Usage]:
+        """One structured routing call with the router timeout; None if it failed."""
+        try:
+            async with asyncio.timeout(self._s.router_timeout_seconds):
+                return await self._llm.structured(system, router_prompt(turns), schema)
+        except TimeoutError:
+            log.warning("router timed out")
+        except Exception:
+            log.warning("router failed", exc_info=True)
+        return None, Usage()
+
     async def route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage, bool]:
         """The router's decision, its tokens, and whether hybrid search applies."""
         started = time.perf_counter()
-        decision, usage = await self._route(turns)
-        user_turns = sum(t.role == "user" for t in turns)
-        hybrid = user_turns >= self._s.search_after_turns and bool(decision.query.strip())
+        decision, usage = await self.classify(turns, ROUTER_SYSTEM, RouteDecision)
+        # Routing is an optimisation: a failed router means answering without search.
+        decision = decision or RouteDecision(needs_search=False)
+        hybrid = self.hybrid(turns, decision.query)
         log.info("rag route", extra={
             "needs_search": decision.needs_search, "needs_account": decision.needs_account,
             "needs_past": decision.needs_past, "hybrid": hybrid, "query": decision.query,
@@ -174,34 +196,21 @@ class RagPipeline:
         # compressed, since a summary may reword a number or drop a source.
         searched_body, compressed, usage = await self._searched_body(
             query, citations[len(pinned):])
-        body = "\n\n".join(b for b in (_render(citations[:len(pinned)]), searched_body) if b)
+        body = "\n\n".join(b for b in (render_sources(citations[:len(pinned)]), searched_body) if b)
         return GroundingResult(
             Grounding(citations, GROUNDING_TEMPLATE.format(body=body), compressed), usage
         )
 
     async def _searched_body(self, query: str, citations: list[Citation]
                              ) -> tuple[str, bool, Usage]:
-        body = _render(citations)
+        body = render_sources(citations)
         if len(body) <= self._s.grounding_char_budget:
             return body, False, Usage()
         summary, usage = await self._compress(query, body, {c.n for c in citations})
         if summary:
             return summary, True, usage
         per_source = self._s.grounding_char_budget // len(citations)
-        return _render(citations, per_source=per_source), False, usage
-
-    async def _route(self, turns: list[ChatTurn]) -> tuple[RouteDecision, Usage]:
-        recent = "\n".join(f"{t.role}: {t.content[:500]}" for t in turns[-6:-1])
-        prompt = f"Conversation so far:\n{recent or '(none)'}\n\n" \
-                 f"Latest user message: {turns[-1].content}"
-        try:
-            async with asyncio.timeout(self._s.router_timeout_seconds):
-                return await self._llm.structured(ROUTER_SYSTEM, prompt, RouteDecision)
-        except TimeoutError:
-            log.warning("rag router timed out; answering without search")
-        except Exception:
-            log.warning("rag router failed; answering without search", exc_info=True)
-        return RouteDecision(needs_search=False), Usage()
+        return render_sources(citations, per_source=per_source), False, usage
 
     async def _retrieve(self, sources: list[SourceSpec]) -> list[SearchHit]:
         started = time.perf_counter()
@@ -235,7 +244,13 @@ class RagPipeline:
         return result.text, result.usage
 
 
-def _render(citations: list[Citation], per_source: int | None = None) -> str:
+def router_prompt(turns: list[ChatTurn]) -> str:
+    recent = "\n".join(f"{t.role}: {t.content[:500]}" for t in turns[-6:-1])
+    return f"Conversation so far:\n{recent or '(none)'}\n\n" \
+           f"Latest user message: {turns[-1].content}"
+
+
+def render_sources(citations: list[Citation], per_source: int | None = None) -> str:
     def clip(text: str) -> str:
         return text if per_source is None or len(text) <= per_source \
             else text[:per_source].rstrip() + "…"
