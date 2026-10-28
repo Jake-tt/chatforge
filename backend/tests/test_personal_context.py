@@ -7,7 +7,7 @@ ACCOUNT_QUESTION = "오늘 남은 토큰 한도는?"
 
 async def _harness(make_harness, llm=None, **settings):
     llm = llm or SpyProvider()
-    h = await make_harness(llm=llm, rag_enabled=True, **settings)
+    h = await make_harness(llm=llm, chat_model=llm.answers, rag_enabled=True, **settings)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
     return h, llm, headers, cid

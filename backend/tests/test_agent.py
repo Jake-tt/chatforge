@@ -8,7 +8,6 @@ past-conversation search, quota, persistence) is real and driven over HTTP.
 import asyncio
 import uuid
 
-import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.agent.stream import FALLBACK_ANSWER
@@ -372,9 +371,16 @@ async def test_only_available_tools_are_offered(make_harness):
     assert [t["function"]["name"] for t in agent.calls[0]["tools"]] == ["search_help"]
 
 
-async def test_the_agent_needs_rag(make_harness):
-    with pytest.raises(ValueError, match="RAG_ENABLED"):
-        await make_harness(agent_enabled=True, rag_enabled=False)
+async def test_without_a_help_center_the_agent_runs_without_help_search(make_harness):
+    agent = ScriptedChatModel(script=[_answer("답")])
+    h = await make_harness(llm=LangChainProvider(
+        main=EchoChatModel(), aux=ScriptedChatModel(script=[ConnectionError("router down")])),
+        chat_model=agent, rag_enabled=False, tasks=RecordingQueue())
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    assert (await h.chat(headers, cid, "안녕")).text == "답"
+    assert "search_help" not in [t["function"]["name"] for t in agent.calls[0]["tools"]]
 
 
 async def test_a_disconnect_keeps_what_the_client_saw_and_charges_for_it(make_harness):
@@ -395,3 +401,15 @@ async def test_a_disconnect_keeps_what_the_client_saw_and_charges_for_it(make_ha
     detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
     assert detail["messages"][-1]["content"].startswith("가" * 120)
     assert (await h.client.get("/usage", headers=headers)).json()["used"] > 0
+
+
+async def test_every_route_decision_is_logged(make_harness, caplog):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="토큰 한도")],
+        agent=[_answer("답")])
+
+    with caplog.at_level("INFO", logger="app.agent.graph"):
+        await h.chat(headers, cid, "토큰 한도?")
+
+    [record] = [r for r in caplog.records if r.message == "agent route"]
+    assert record.routed and record.plan["help"] and record.plan["query"] == "토큰 한도"

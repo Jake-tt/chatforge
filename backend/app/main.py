@@ -49,8 +49,6 @@ def create_app(
         guard = RedisGuard(redis_client)
         provider = llm or build_provider(settings)
         rag = _build_rag(settings, provider, search)
-        if settings.agent_enabled and rag is None:
-            raise ValueError("AGENT_ENABLED needs RAG_ENABLED and a knowledge base")
         app.state.ctx = AppContext(
             settings=settings,
             engine=engine,
@@ -104,14 +102,23 @@ def create_app(
 def _build_rag(
     settings: Settings, llm: LLMProvider, search: SearchProvider | None
 ) -> RagPipeline | None:
+    """The agent always routes, so it always gets a pipeline; without a help center its
+    help search is simply absent. The legacy pipeline keeps "no RAG, no pipeline"."""
+    help_center = _help_center(settings, search)
+    if help_center is None and not settings.agent_enabled:
+        return None
+    return RagPipeline(llm, help_center, settings)
+
+
+def _help_center(settings: Settings, search: SearchProvider | None) -> SearchProvider | None:
     if not settings.rag_enabled:
         return None
-    if search is None:
-        documents = load_markdown_corpus(settings.knowledge_dir)
-        if not documents:
-            logging.getLogger(__name__).warning(
-                "RAG enabled but no documents in %s; disabling", settings.knowledge_dir
-            )
-            return None
-        search = BM25Search(documents)
-    return RagPipeline(llm, search, settings)
+    if search is not None:
+        return search
+    documents = load_markdown_corpus(settings.knowledge_dir)
+    if not documents:
+        logging.getLogger(__name__).warning(
+            "RAG enabled but no documents in %s; help search disabled", settings.knowledge_dir
+        )
+        return None
+    return BM25Search(documents)

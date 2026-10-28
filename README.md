@@ -137,10 +137,10 @@ flowchart LR
 - **정합성**: 요약과 경계는 같은 행에 있고, "작업을 시작할 때의 경계와 같을 때만" 한 번의 UPDATE로 함께 바뀝니다. Cloud Tasks가 같은 작업을 겹쳐 전달해도 한 결과만 반영됩니다. 읽는 쪽은 항상 짝이 맞는 요약과 경계를 받으므로 메시지가 빠지거나 두 번 들어가지 않습니다.
 - **실패 시**: 요약 호출 실패, 타임아웃, 길이 초과면 아무것도 바꾸지 않고 기존처럼 전체 창을 보냅니다. 토큰은 실제로 반영된 요약만 대화 소유자에게 과금합니다. 재시도나 경쟁에서 진 실행 비용은 서비스가 부담합니다.
 
-### 11. LangGraph 에이전트 (`AGENT_ENABLED`)
+### 11. LangGraph 에이전트 (기본 경로)
 [`app/agent/graph.py`](backend/app/agent/graph.py) · [`tools.py`](backend/app/agent/tools.py) · 테스트 [`test_agent.py`](backend/tests/test_agent.py)
 
-실무에서 설계한 LangGraph 에이전트 구조를 설계만 가져와 새로 구현했습니다(회사 코드는 사용하지 않았습니다).
+실무에서 설계한 LangGraph 에이전트 구조를 설계만 가져와 새로 구현했습니다(회사 코드는 사용하지 않았습니다). 모든 대화가 이 그래프를 거칩니다. 도움말 문서가 없으면 도움말 검색만 빠지고 나머지는 그대로 동작합니다.
 
 ```
 router ─▶ master_router ─┬─▶ clarify ─▶ END
@@ -166,7 +166,7 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 
 - Cloud Logging이 파싱하는 JSON 한 줄 로그를 씁니다. `severity`로 로그 레벨을, `logging.googleapis.com/trace`로 Cloud Trace를 연결합니다.
 - 요청마다 `request_id`를 부여하고, 이 값을 contextvars로 SSE 스트림과 백그라운드 작업 로그까지 전파합니다. 응답을 버퍼링하지 않는 순수 ASGI 미들웨어라서 스트리밍을 방해하지 않습니다.
-- RAG는 라우터 소요 시간과, 검색 소스별 결과 수·소요 시간·실패 원인(`timeout`, 예외 이름)을 구조화 필드로 남깁니다. 실패한 소스는 traceback과 함께 경고 로그를 남깁니다.
+- 에이전트 router는 판단 결과(라우팅 성공 여부, 되묻기, 소스 계획)와 소요 시간을, RAG는 검색 소스별 결과 수·소요 시간·실패 원인(`timeout`, 예외 이름)을 구조화 필드로 남깁니다. 실패한 소스는 traceback과 함께 경고 로그를 남깁니다.
 
 ## 실무 사례 → chatforge 재현
 
@@ -267,7 +267,7 @@ LLM_PROVIDER=ollama AGENT_ENABLED=true uvicorn app.main:create_app --factory --r
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 135개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 136개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 

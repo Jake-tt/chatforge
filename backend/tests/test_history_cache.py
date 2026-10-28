@@ -3,12 +3,12 @@
 import asyncio
 import json
 
-from tests.test_chat import RecordingProvider
+from tests.fakes import RecordingChatModel
 
 
 async def _setup(make_harness, **settings):
-    llm = RecordingProvider()
-    h = await make_harness(llm=llm, **settings)
+    llm = RecordingChatModel()
+    h = await make_harness(chat_model=llm, **settings)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
     owner = (await h.client.get("/auth/me", headers=headers)).json()
@@ -37,7 +37,7 @@ async def test_context_is_read_from_cache_when_complete(make_harness):
 
     await h.chat(headers, cid, "two")
 
-    assert [t.content for t in llm.calls[-1]] == ["from-cache", "reply 1", "two"]
+    assert llm.contents() == ["from-cache", "reply 1", "two"]
 
 
 async def test_gap_in_cache_falls_back_to_database(make_harness):
@@ -49,7 +49,7 @@ async def test_gap_in_cache_falls_back_to_database(make_harness):
 
     await h.chat(headers, cid, "three")
 
-    assert [t.content for t in llm.calls[-1]] == [
+    assert llm.contents() == [
         "one", "reply 1", "two", "reply 2", "three",
     ]
     seqs = [json.loads(x)["s"] for x in await h.ctx.redis.lrange(key, 0, -1)]
@@ -64,7 +64,7 @@ async def test_expired_cache_falls_back_to_database(make_harness):
     await h.chat(headers, cid, "two")
 
     # RPUSHX didn't create a tail-only list; the read rebuilt the full history.
-    assert [t.content for t in llm.calls[-1]] == ["one", "reply 1", "two"]
+    assert llm.contents() == ["one", "reply 1", "two"]
 
 
 async def test_cache_window_is_trimmed_to_history_limit(make_harness):
@@ -73,7 +73,7 @@ async def test_cache_window_is_trimmed_to_history_limit(make_harness):
         await h.chat(headers, cid, text)
 
     assert await h.ctx.redis.llen(key) == 3
-    assert [t.content for t in llm.calls[-1]] == ["two", "reply 2", "three"]
+    assert llm.contents() == ["two", "reply 2", "three"]
 
 
 async def test_concurrent_messages_get_distinct_contiguous_seqs(make_harness):

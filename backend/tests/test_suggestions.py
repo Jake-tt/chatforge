@@ -2,8 +2,11 @@
 
 import asyncio
 
-from app.services.llm import Completion, FakeProvider, LLMError, TextDelta
+from langchain_core.messages import AIMessage
+
+from app.services.llm import FakeProvider, LLMError
 from app.services.suggestions import FollowUps
+from tests.fakes import ScriptedChatModel, usage
 
 
 def test_validator_cleans_model_artefacts():
@@ -44,13 +47,16 @@ async def test_suggestions_are_streamed_before_done_and_charged(make_harness):
 
 class SlowSuggestions(FakeProvider):
     async def structured(self, system, prompt, schema):
-        await asyncio.sleep(1)
+        if schema is FollowUps:  # only the suggestion call; the router stays fast
+            await asyncio.sleep(1)
         return await super().structured(system, prompt, schema)
 
 
 class BrokenSuggestions(FakeProvider):
     async def structured(self, system, prompt, schema):
-        raise LLMError("bad output", retryable=False)
+        if schema is FollowUps:
+            raise LLMError("bad output", retryable=False)
+        return await super().structured(system, prompt, schema)
 
 
 async def test_slow_or_failing_suggestions_never_break_the_reply(make_harness):
@@ -66,14 +72,11 @@ async def test_slow_or_failing_suggestions_never_break_the_reply(make_harness):
         assert "suggestions" not in [e for e, _ in result.events]
 
 
-class Refusing(FakeProvider):
-    async def stream(self, system, turns):
-        yield TextDelta("I can't help with that.")
-        yield Completion(5, 5, stop_reason="refusal")
-
-
 async def test_no_suggestions_after_a_refusal(make_harness):
-    h = await make_harness(llm=Refusing(), suggestions_enabled=True)
+    refusal = AIMessage("I can't help with that.", usage_metadata=usage(5, 5),
+                        response_metadata={"stop_reason": "refusal"})
+    h = await make_harness(chat_model=ScriptedChatModel(script=[refusal]),
+                           suggestions_enabled=True)
     headers = await h.guest()
     cid = await h.new_conversation(headers)
 

@@ -60,8 +60,9 @@ class Settings(BaseSettings):
     conversation_summary_char_limit: int = 2000
     summary_timeout_seconds: float = 30.0
 
-    # LangGraph agent (router → coordinator / ReAct tools). Off until the switch-over PR.
-    agent_enabled: bool = False
+    # LangGraph agent (router → coordinator / ReAct tools). The legacy fixed pipeline runs
+    # only with this off, and is removed in the next PR.
+    agent_enabled: bool = True
     agent_max_tool_rounds: int = Field(default=3, ge=0, le=5)  # bounds cost per turn
     agent_max_tool_calls: int = Field(default=4, ge=1, le=8)  # per round
     agent_timeout_seconds: float = 60.0  # per agent model call
