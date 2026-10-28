@@ -3,14 +3,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.language_models import BaseChatModel
 from redis.asyncio import Redis
 from sqlalchemy import text
 
+from app.agent.graph import build_agent_graph
 from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, usage
+from app.services.chat_models import build_chat_model
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
@@ -28,6 +31,7 @@ def create_app(
     llm: LLMProvider | None = None,
     tasks: TaskQueue | None = None,
     search: SearchProvider | None = None,
+    chat_model: BaseChatModel | None = None,
 ) -> FastAPI:
     """App factory. Tests inject settings, fake Redis/LLM/search and a task queue."""
     settings = settings or get_settings()
@@ -44,6 +48,9 @@ def create_app(
         )
         guard = RedisGuard(redis_client)
         provider = llm or build_provider(settings)
+        rag = _build_rag(settings, provider, search)
+        if settings.agent_enabled and rag is None:
+            raise ValueError("AGENT_ENABLED needs RAG_ENABLED and a knowledge base")
         app.state.ctx = AppContext(
             settings=settings,
             engine=engine,
@@ -53,10 +60,13 @@ def create_app(
             llm=provider,
             quota=QuotaService(guard, settings.quota_timezone),
             history=HistoryCache(guard, settings.history_limit),
-            rag=_build_rag(settings, provider, search),
+            rag=rag,
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,
             tasks=queue,
+            chat_model=(chat_model or build_chat_model(settings, purpose="main"))
+            if settings.agent_enabled else None,
+            agent=build_agent_graph() if settings.agent_enabled else None,
         )
         try:
             yield

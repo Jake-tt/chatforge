@@ -25,8 +25,8 @@ chatforge의 대화 흐름이 고정 파이프라인(라우터 → 검색 → �
 
 ## 단계별 PR (추가 → 전환 → 제거)
 
-1. **PR A — 모델 계층 추가**: LangChain 채팅 모델 팩토리(anthropic / ollama / fake)와 `usage_metadata` → `Usage` 변환. 기존 경로는 그대로
-2. **PR B — 에이전트 그래프 추가**: `backend/app/agent/`에 상태·노드·그래프. `AGENT_ENABLED` 플래그(기본 끔). HTTP 테스트에서 플래그를 켜고 fake 모델로 도구 호출 시나리오 검증
+1. **PR A — 모델 계층 추가** (완료, #4): LangChain 채팅 모델 팩토리(anthropic / ollama / fake)와 `usage_metadata` → `Usage` 변환. 기존 경로는 그대로
+2. **PR B — 에이전트 그래프 추가** (진행 중, 2026-10-28): `backend/app/agent/`에 상태·노드·그래프. `AGENT_ENABLED` 플래그(기본 끔). HTTP 테스트에서 플래그를 켜고 fake 모델로 도구 호출 시나리오 검증
 3. **PR C — 호출부 전환**: `send_message`가 에이전트 그래프를 쓰도록 전환. SSE 이벤트 계약(`delta`·`sources`·`suggestions`·`done`)과 과금은 그대로 유지
 4. **PR D — 기존 경로 제거**: 고정 파이프라인 오케스트레이션(`RagPipeline.ground` 등)과 쓰이지 않게 된 코드 제거
 5. **PR E — PubMed 도구와 평가 파이프라인**: 데이터 확보 확인 후 별도 진행

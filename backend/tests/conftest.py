@@ -105,7 +105,7 @@ async def make_harness(make_settings):
 
     async def _make(
         *, llm: LLMProvider | None = None, redis=None, tasks=None, search=None,
-        **settings_overrides,
+        chat_model=None, **settings_overrides,
     ) -> Harness:
         settings = make_settings(**settings_overrides)
         app = create_app(
@@ -114,6 +114,7 @@ async def make_harness(make_settings):
             llm=llm or FakeProvider(),
             tasks=tasks,
             search=search,
+            chat_model=chat_model,
         )
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()

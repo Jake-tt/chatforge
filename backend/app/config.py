@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     conversation_summary_char_limit: int = 2000
     summary_timeout_seconds: float = 30.0
 
+    # LangGraph agent (router → coordinator / ReAct tools). Off until the switch-over PR.
+    agent_enabled: bool = False
+    agent_max_tool_rounds: int = 3
+
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True
     suggestions_timeout_seconds: float = 6.0

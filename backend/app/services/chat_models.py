@@ -99,6 +99,10 @@ class EchoChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "echo"
 
+    def bind_tools(self, tools, **kwargs):
+        # It never calls tools, so binding them changes nothing (lets the agent run on it).
+        return self
+
     @staticmethod
     def _reply(messages: list[BaseMessage]) -> str:
         last = next((m for m in reversed(messages) if isinstance(m, HumanMessage)), None)

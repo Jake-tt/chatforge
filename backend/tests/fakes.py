@@ -53,9 +53,15 @@ class ScriptedChatModel(BaseChatModel):
                 content=word if i == 0 else " " + word))
         yield ChatGenerationChunk(message=AIMessageChunk(
             content="",
+            # Invalid calls go out with their raw, unparseable args, as a provider streams
+            # them; LangChain turns them back into `invalid_tool_calls` when merging.
             tool_call_chunks=[
                 {"name": c["name"], "args": json.dumps(c["args"]), "id": c["id"], "index": i}
                 for i, c in enumerate(message.tool_calls)
+            ] + [
+                {"name": c["name"], "args": c["args"], "id": c["id"],
+                 "index": len(message.tool_calls) + i}
+                for i, c in enumerate(message.invalid_tool_calls)
             ],
             usage_metadata=message.usage_metadata,
             response_metadata=message.response_metadata,
