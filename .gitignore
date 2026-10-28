@@ -21,3 +21,6 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# personal file
+plan/*
