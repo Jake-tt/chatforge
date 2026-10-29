@@ -93,7 +93,8 @@ async def test_concurrent_deliveries_of_one_event_apply_it_once(ph):
         assert len((await session.scalars(select(PaymentEvent))).all()) == 1
 
 
-@pytest.mark.parametrize("tamper", ["body", "secret", "missing", "garbled", "old"])
+@pytest.mark.parametrize("tamper", ["body", "secret", "missing", "garbled", "old", "future",
+                                    "non_ascii", "huge_t"])
 async def test_unsigned_or_forged_deliveries_are_rejected(ph, tamper):
     headers, user_id = await _member(ph)
     body = _event(user_id, "subscription.activated")
@@ -104,6 +105,13 @@ async def test_unsigned_or_forged_deliveries_are_rejected(ph, tamper):
         "garbled": {"Chatforge-Signature": "v1=zz", "Content-Type": "application/json"},
         # A captured delivery replayed later: the signature is valid but stale.
         "old": _signed(body, at=int(time.time()) - 3600),
+        # Or signed ahead, to stay replayable for days.
+        "future": _signed(body, at=int(time.time()) + 3600),
+        # Junk an attacker can send must be a 401, never a 500.
+        "non_ascii": {"Chatforge-Signature": f"t={int(time.time())},v1=\u00e9".encode("latin-1"),
+                      "Content-Type": "application/json"},
+        "huge_t": {"Chatforge-Signature": "t=" + "9" * 400 + ",v1=00",
+                   "Content-Type": "application/json"},
     }[tamper]
     sent = body.replace(b"activated", b"canceled!") if tamper == "body" else body
 
@@ -141,3 +149,78 @@ async def test_a_deleted_account_is_not_upgraded(ph):
 async def test_without_a_secret_there_is_no_webhook_endpoint(h):
     body = _event(str(uuid.uuid4()), "subscription.activated")
     assert (await _deliver(h, body)).status_code == 404
+
+
+async def test_a_rotated_secret_still_verifies_while_both_are_sent(ph):
+    # During a key rotation the provider signs with old and new keys at once.
+    headers, user_id = await _member(ph)
+    body = _event(user_id, "subscription.activated")
+    at = int(time.time())
+    old = _signed(body, secret="previous-secret", at=at)["Chatforge-Signature"].split(",")[1]
+    new = _signed(body, at=at)["Chatforge-Signature"]
+    both = {"Chatforge-Signature": f"{new}, {old}", "Content-Type": "application/json"}
+
+    assert (await _deliver(ph, body, both)).json()["status"] == "applied"
+
+
+async def test_a_signed_but_malformed_event_is_acknowledged_as_invalid(ph):
+    # The provider's own bad payload never gets better on retry.
+    body = b'{"id": ""}'
+    r = await _deliver(ph, body)
+    assert (r.status_code, r.json()["status"]) == (200, "invalid")
+
+
+async def test_event_times_must_carry_a_timezone_and_are_ordered_as_instants(ph):
+    headers, user_id = await _member(ph)
+    naive = json.dumps({"id": "evt_naive", "type": "subscription.activated",
+                        "user_id": user_id, "occurred_at": "2026-10-29T09:00:00"}).encode()
+    assert (await _deliver(ph, naive)).json()["status"] == "invalid"
+
+    # 10:00+09:00 is 01:00Z: an hour *before* a 02:00Z cancellation, though it looks later.
+    await _deliver(ph, _event(user_id, "subscription.canceled",
+                              at=datetime(2026, 10, 29, 2, 0, tzinfo=UTC)))
+    late = await _deliver(ph, _event(user_id, "subscription.activated",
+                                     at=datetime.fromisoformat("2026-10-29T10:00:00+09:00")))
+    assert late.json()["status"] == "stale"
+    assert await _plan(ph, headers) == "free"
+
+
+async def test_only_plan_changes_count_when_ordering_events(ph):
+    headers, user_id = await _member(ph)
+    await _deliver(ph, _event(user_id, "invoice.created", at=T0 + timedelta(days=1)))
+
+    r = await _deliver(ph, _event(user_id, "subscription.activated", at=T0))
+
+    assert r.json()["status"] == "applied"
+    assert await _plan(ph, headers) == "pro"
+
+
+@pytest.mark.parametrize("first", ["evt_a", "evt_b"])
+async def test_events_at_the_same_instant_settle_the_same_way_in_any_order(ph, first):
+    # Ties break by event id, so arrival order can't decide the plan.
+    headers, user_id = await _member(ph)
+    events = {"evt_a": _event(user_id, "subscription.activated", id_="evt_a"),
+              "evt_b": _event(user_id, "subscription.canceled", id_="evt_b")}
+    second = "evt_b" if first == "evt_a" else "evt_a"
+
+    await _deliver(ph, events[first])
+    await _deliver(ph, events[second])
+
+    assert await _plan(ph, headers) == "free"  # evt_b sorts last
+
+
+async def test_concurrent_events_for_one_user_leave_the_newest_plan(ph):
+    # Meaningful on Postgres (CI): the user row lock decides one event after the other.
+    headers, user_id = await _member(ph)
+    for round_ in range(5):
+        bodies = [_event(user_id, "subscription.activated", at=T0 + timedelta(days=round_)),
+                  _event(user_id, "subscription.canceled",
+                         at=T0 + timedelta(days=round_, hours=1))]
+        await asyncio.gather(*(_deliver(ph, b) for b in reversed(bodies)))
+        assert await _plan(ph, headers) == "free"
+
+
+async def test_an_oversized_delivery_is_refused_before_verifying(ph):
+    body = b"x" * (64 * 1024 + 1)
+    r = await _deliver(ph, body)
+    assert (r.status_code, r.json()["detail"]["code"]) == (413, "payload_too_large")

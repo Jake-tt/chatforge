@@ -5,21 +5,23 @@
   replayed later.
 - Idempotent: the provider's event id is the primary key of `payment_events`. A redelivery
   conflicts on insert and changes nothing, however late it comes.
-- Ordered: a user's plan follows their newest event by `occurred_at`. An event that
-  arrives after a newer one is recorded as stale, not applied. The user row is locked
-  first, so two events for one user are decided one after the other.
-- Acknowledged: an event we can't act on (unknown type, unknown or deleted user) is still
-  recorded and answered with 2xx; a retry would never succeed and would only repeat.
+- Ordered: a user's plan follows their newest applied event by `occurred_at`, ties
+  broken by event id, so arrival order never decides. An event that arrives after a newer
+  one is recorded as stale, not applied. The user row is locked first, so two events for
+  one user are decided one after the other.
+- Acknowledged: an event we can't act on (unknown type, unknown or deleted user, or a
+  signed payload that doesn't parse) is answered with 2xx; a retry would never succeed
+  and would only repeat.
 """
 
 import hashlib
 import hmac
 import time
 import uuid
-from datetime import datetime
+from datetime import UTC
 
-from pydantic import BaseModel, Field
-from sqlalchemy import exists, select, update
+from pydantic import AwareDatetime, BaseModel, Field, field_validator
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,21 +39,36 @@ class PaymentEventIn(BaseModel):
     id: str = Field(min_length=1, max_length=128)
     type: str = Field(max_length=64)
     user_id: uuid.UUID
-    occurred_at: datetime
+    # With an offset, so events order as instants. SQLite keeps wall-clock time only,
+    # hence UTC before storing.
+    occurred_at: AwareDatetime
+
+    @field_validator("occurred_at")
+    @classmethod
+    def _utc(cls, value):
+        return value.astimezone(UTC)
 
 
 def verify_signature(header: str | None, body: bytes, secret: str,
                      now: float | None = None) -> None:
-    """Raise unless `header` ("t=<unix>,v1=<hex>") signs `body` within the tolerance."""
-    try:
-        fields = dict(part.split("=", 1) for part in (header or "").split(","))
-        at, given = int(fields["t"]), fields["v1"]
-    except (KeyError, ValueError) as exc:
-        raise InvalidSignature("malformed signature header") from exc
+    """Raise unless `header` ("t=<unix>,v1=<hex>[,v1=<hex>]") signs `body` within the
+    tolerance. Several `v1` values are allowed: during a key rotation the provider signs
+    with both keys, and any match is enough."""
+    at, given = None, []
+    for part in (header or "").split(","):
+        key, _, value = part.strip().partition("=")
+        if key == "t" and value.isdigit() and len(value) <= 12:
+            at = int(value)
+        elif key == "v1" and value.isascii():
+            given.append(value.encode())
+    if at is None or not given:
+        raise InvalidSignature("malformed signature header")
+    # Both ways: a signature dated ahead would stay replayable until that time.
     if abs((time.time() if now is None else now) - at) > SIGNATURE_TOLERANCE_SECONDS:
         raise InvalidSignature("signature timestamp outside tolerance")
-    expected = hmac.new(secret.encode(), f"{at}.".encode() + body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, given):
+    expected = hmac.new(secret.encode(), f"{at}.".encode() + body,
+                        hashlib.sha256).hexdigest().encode()
+    if not any(hmac.compare_digest(expected, g) for g in given):
         raise InvalidSignature("signature mismatch")
 
 
@@ -86,9 +103,10 @@ async def _apply(session: AsyncSession, event: PaymentEventIn) -> str:
         return "unknown_user"
     newer = await session.scalar(select(exists().where(
         PaymentEvent.user_id == event.user_id,
-        PaymentEvent.type.in_(PLAN_FOR_EVENT),
-        PaymentEvent.occurred_at > event.occurred_at,
-        PaymentEvent.id != event.id)))
+        PaymentEvent.outcome == "applied",
+        or_(PaymentEvent.occurred_at > event.occurred_at,
+            and_(PaymentEvent.occurred_at == event.occurred_at,
+                 PaymentEvent.id > event.id)))))
     if newer:
         return "stale"
     user.plan = plan

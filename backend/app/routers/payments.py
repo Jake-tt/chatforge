@@ -13,6 +13,8 @@ from app.services.payments import InvalidSignature, PaymentEventIn, record_event
 
 log = logging.getLogger(__name__)
 
+MAX_BODY_BYTES = 64 * 1024  # events are small; the body is read before it is verified
+
 router = APIRouter(prefix="/webhooks", include_in_schema=False)
 
 
@@ -24,6 +26,8 @@ async def payment_webhook(
 ) -> dict:
     # The signature covers the raw bytes, so verify before parsing anything.
     body = await request.body()
+    if len(body) > MAX_BODY_BYTES:
+        raise ApiError(413, "payload_too_large", "Webhook body too large")
     try:
         verify_signature(request.headers.get("chatforge-signature"), body,
                          ctx.settings.payment_webhook_secret.get_secret_value())
@@ -33,7 +37,10 @@ async def payment_webhook(
     try:
         event = PaymentEventIn.model_validate_json(body)
     except ValidationError as exc:
-        raise ApiError(400, "invalid_event", "Malformed webhook event") from exc
+        # Signed by the provider, so it's their bug: retrying won't fix it. Acknowledge,
+        # and log loudly enough to be noticed.
+        log.error("payment webhook event does not parse: %s", exc.errors()[:3])
+        return {"status": "invalid"}
 
     status = await record_event(session, event)
     await session.commit()
