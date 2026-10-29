@@ -103,6 +103,7 @@ class Settings(BaseSettings):
     trusted_proxy_hops: int = Field(default=0, ge=0)
 
     # Async jobs
+    purge_batch_conversations: int = Field(default=100, ge=1)  # per transaction
     task_backend: Literal["inline", "cloudtasks"] = "inline"
     gcp_project: str = ""
     gcp_location: str = "asia-northeast3"

@@ -16,6 +16,10 @@ class Credentials(BaseModel):
     guest_token: str | None = None
 
 
+class PasswordConfirm(BaseModel):
+    password: str = Field(max_length=128)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

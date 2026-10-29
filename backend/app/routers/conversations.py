@@ -503,6 +503,12 @@ async def _persist_reply(
         message = None
         if text:
             seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
+            if seq is None:
+                # The account was deleted and purged while this reply streamed: nothing
+                # to store it in, and no one left to charge. Leaving now rolls back.
+                log.info("dropping a reply to a purged conversation",
+                         extra={"conversation_id": str(conversation_id)})
+                return None
             message = Message(
                 conversation_id=conversation_id, seq=seq, role="assistant", content=text,
                 input_tokens=usage.prompt_tokens, output_tokens=usage.output_tokens,

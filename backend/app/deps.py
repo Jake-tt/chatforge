@@ -14,6 +14,11 @@ from app.security import InvalidToken, PrincipalKind, decode_token
 from app.services.claim import guest_subject, user_subject
 
 
+def require_member(principal: "Principal") -> None:
+    if principal.kind != "user":
+        raise ApiError(403, "members_only", "Only signed-up accounts can do this")
+
+
 @dataclass(frozen=True)
 class Principal:
     kind: PrincipalKind
@@ -76,8 +81,11 @@ async def get_principal(
 
     if claims.kind == "user":
         user = await session.get(User, claims.subject_id)
-        if user is None:
+        if user is None or user.deleted_at is not None:
             raise ApiError(401, "invalid_token", "User no longer exists")
+        # Checked on every request, so a revocation applies at once, not at expiry.
+        if claims.version != user.token_version:
+            raise ApiError(401, "token_revoked", "This session was signed out")
         return Principal("user", user.id, user.plan, user.email)
 
     guest = await session.get(Guest, claims.subject_id)

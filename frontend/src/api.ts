@@ -159,7 +159,20 @@ export const api = {
     return result;
   },
 
-  logout() {
+  /** Delete the account (password re-checked). The server purges its data in the background. */
+  async deleteAccount(password: string) {
+    await authedFetch("/auth/me", { method: "DELETE", body: JSON.stringify({ password }) }, false);
+    storeToken(null);
+  },
+
+  /** Sign out here; with `everywhere`, revoke this account's tokens on every device. */
+  async logout(everywhere = false) {
+    try {
+      if (everywhere) await authedFetch("/auth/logout-all", { method: "POST" }, false);
+    } catch (err) {
+      // Already signed out (revoked elsewhere, or expired): the goal is met.
+      if (!(err instanceof ApiError && err.status === 401)) throw err;
+    }
     storeToken(null);
   },
 
