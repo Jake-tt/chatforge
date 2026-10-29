@@ -102,6 +102,9 @@ class Settings(BaseSettings):
     # client IP is the entry the outermost one appended; entries left of it are forgeable.
     trusted_proxy_hops: int = Field(default=0, ge=0)
 
+    # Payment provider webhooks; the endpoint exists only when a secret is set
+    payment_webhook_secret: SecretStr | None = None
+
     # Async jobs
     purge_batch_conversations: int = Field(default=100, ge=1)  # per transaction
     task_backend: Literal["inline", "cloudtasks"] = "inline"

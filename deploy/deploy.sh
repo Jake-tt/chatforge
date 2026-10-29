@@ -40,6 +40,8 @@ gcloud run jobs execute chatforge-migrate --region "$REGION" --wait
 PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format 'value(projectNumber)')"
 SERVICE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 
+# Payment webhooks stay off (no PAYMENT_WEBHOOK_SECRET) until a provider is connected:
+# create the secret, then add PAYMENT_WEBHOOK_SECRET=PAYMENT_WEBHOOK_SECRET:latest below.
 gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
   --service-account "$RUNTIME_SA" --allow-unauthenticated \
   --add-cloudsql-instances "$SQL_CONN" \
