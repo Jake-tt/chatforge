@@ -68,8 +68,13 @@ export default function App() {
     await refresh();
   };
 
-  const logout = async () => {
-    api.logout();
+  const logout = async (everywhere = false) => {
+    try {
+      await api.logout(everywhere);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "로그아웃하지 못했어요.");
+      return;
+    }
     select(null);
     setNotice(null);
     await refresh();
@@ -87,6 +92,7 @@ export default function App() {
         onDelete={(id) => void deleteConversation(id)}
         onLogin={() => setAuthOpen(true)}
         onLogout={() => void logout()}
+        onLogoutEverywhere={() => void logout(true)}
       />
       <main className="main">
         {error && <div className="banner banner-error">{error}</div>}

@@ -2,12 +2,19 @@ import hashlib
 import hmac
 
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import AppContext
-from app.deps import Principal, client_ip, get_ctx, get_principal, get_session
+from app.deps import (
+    Principal,
+    client_ip,
+    get_ctx,
+    get_principal,
+    get_session,
+    require_member,
+)
 from app.errors import ApiError
 from app.models import Guest, User
 from app.schemas import AuthOut, ClaimOut, Credentials, GuestTokenOut, MeOut, UserOut
@@ -121,7 +128,8 @@ async def _finish_auth(
         # Cached histories are keyed by owner; the guest's keys are now unreachable.
         await ctx.history.invalidate_owner(guest_subject(claims.subject_id))
 
-    token = create_token("user", user.id, secret, ctx.settings.user_token_ttl_minutes)
+    token = create_token("user", user.id, secret, ctx.settings.user_token_ttl_minutes,
+                         version=user.token_version)
     return AuthOut(
         token=token,
         user=UserOut.model_validate(user),
@@ -136,3 +144,16 @@ async def _finish_auth(
 @router.get("/me", response_model=MeOut)
 async def me(principal: Principal = Depends(get_principal)) -> MeOut:
     return MeOut(kind=principal.kind, id=principal.id, plan=principal.plan, email=principal.email)
+
+
+@router.post("/logout-all", status_code=204)
+async def logout_all(
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Sign out every device, this one included. A stolen token stops working at once."""
+    require_member(principal)
+    # In SQL, so two concurrent calls both count; either way every older token is dead.
+    await session.execute(update(User).where(User.id == principal.id)
+                          .values(token_version=User.token_version + 1))
+    await session.commit()

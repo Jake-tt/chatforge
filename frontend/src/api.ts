@@ -159,7 +159,9 @@ export const api = {
     return result;
   },
 
-  logout() {
+  /** Sign out here; with `everywhere`, revoke this account's tokens on every device. */
+  async logout(everywhere = false) {
+    if (everywhere) await authedFetch("/auth/logout-all", { method: "POST" }, false);
     storeToken(null);
   },
 

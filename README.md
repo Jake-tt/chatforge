@@ -187,6 +187,15 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 - 요청마다 `request_id`를 부여하고, 이 값을 contextvars로 SSE 스트림과 백그라운드 작업 로그까지 전파합니다. 응답을 버퍼링하지 않는 순수 ASGI 미들웨어라서 스트리밍을 방해하지 않습니다.
 - 에이전트 router는 판단 결과(라우팅 성공 여부, 되묻기, 소스 계획)와 소요 시간을, RAG는 검색 소스별 결과 수·소요 시간·실패 원인(`timeout`, 예외 이름)을 구조화 필드로 남깁니다. 실패한 소스는 traceback과 함께 경고 로그를 남깁니다.
 
+### 13. 토큰 폐기
+[`deps.get_principal`](backend/app/deps.py) · [`routers/auth.py`](backend/app/routers/auth.py) · 테스트 [`test_account.py`](backend/tests/test_account.py)
+
+- JWT는 서명만 확인하면 만료 전까지 유효해서, 토큰이 유출되면 막을 방법이 없었습니다. 회원 토큰에 발급 시점의 `users.token_version`을 `ver`로 넣고, 요청마다 DB 값과 비교합니다. `POST /auth/logout-all`이 버전을 올리면 **모든 기기의 토큰이 즉시** `401 token_revoked`가 됩니다.
+- 요청마다 이미 사용자 행을 읽고 있으므로(요금제 확인), 비교에 드는 추가 조회는 없습니다.
+- 버전을 올리는 UPDATE는 SQL에서 `token_version + 1`로 계산합니다. 동시에 두 번 호출돼도 둘 다 반영되고, 어느 쪽이든 이전 토큰은 모두 무효가 됩니다.
+- `ver`가 없는 이전 릴리스의 토큰은 버전 0으로 읽습니다. 배포하는 순간 모든 사용자가 로그아웃되지 않게 하기 위해서입니다.
+- 클라이언트는 401을 받으면 새 게스트 세션으로 넘어가므로, 다른 기기는 다음 요청에서 자연스럽게 로그아웃됩니다.
+
 ## 실무 사례 → chatforge 재현
 
 실무(헬스케어 AI 챗봇, 개발자 3명 + 대표)에서 실제로 겪은 문제입니다. 날짜는 당시 저장소의 커밋 기록 기준이고, 팀원이 한 작업과 제가 한 작업을 나눠 적었습니다. 회사 코드는 옮기지 않았고, 같은 문제를 chatforge에서 다시 설계해 테스트로 고정했습니다.
@@ -339,7 +348,7 @@ deploy/                # GCP 셋업·배포 스크립트
 
 ## 한계와 다음 단계
 
-- Access token만 있고 refresh token과 토큰 폐기(revocation)는 없습니다.
+- refresh token이 없어 access token의 수명(기본 24시간)이 깁니다. 대신 `token_version`으로 언제든 즉시 폐기할 수 있습니다.
 - 계정당 로그인 실패 제한은, 남이 그 계정으로 일부러 틀리면 주인도 15분 동안 로그인할 수 없다는 뜻입니다. IP당 제한이 이를 늦추지만 IP가 많은 공격자는 막지 못합니다. CAPTCHA나 이메일 인증으로 풀어 주는 단계가 다음 과제입니다.
 - rate limit은 고정 구간(fixed window) 방식이라, 구간 경계 앞뒤로 몰아서 보내면 잠깐 동안 한도의 두 배까지 통과합니다.
 - Cloud Run이 `X-Forwarded-For`에 클라이언트 IP를 맨 오른쪽에 붙인다는 가정(`TRUSTED_PROXY_HOPS=1`)은 배포 후 실제 요청 헤더로 확인해야 합니다. 앞에 외부 로드밸런서를 두면 홉 수가 바뀝니다.

@@ -10,6 +10,7 @@ interface Props {
   onDelete: (id: string) => void;
   onLogin: () => void;
   onLogout: () => void;
+  onLogoutEverywhere: () => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -65,6 +66,13 @@ export default function Sidebar(props: Props) {
             <span className="muted">{me.email}</span>
             <button className="btn btn-ghost" onClick={props.onLogout}>
               로그아웃
+            </button>
+            <button
+              className="btn btn-ghost"
+              title="다른 기기에 로그인된 세션도 모두 끝냅니다"
+              onClick={props.onLogoutEverywhere}
+            >
+              모든 기기
             </button>
           </div>
         ) : (
