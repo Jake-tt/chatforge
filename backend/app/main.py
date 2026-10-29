@@ -16,7 +16,7 @@ from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
-from app.routers import auth, conversations, internal, usage
+from app.routers import auth, conversations, internal, payments, usage
 from app.routers.conversations import drain_unfinished_writes
 from app.services.chat_models import build_chat_model
 from app.services.history import HistoryCache
@@ -116,6 +116,8 @@ def create_app(
     app.include_router(usage.router)
     if settings.task_backend == "cloudtasks":
         app.include_router(internal.router)
+    if settings.payment_webhook_secret:
+        app.include_router(payments.router)
 
     @app.get("/healthz", tags=["ops"])
     async def healthz() -> dict:
