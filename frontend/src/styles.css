@@ -101,6 +101,7 @@ body { background: var(--bg); color: var(--text); }
 }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.btn-danger { background: var(--danger-bg); color: var(--danger-text); border-color: var(--danger-text); }
 .btn-ghost { border-color: transparent; color: var(--muted); }
 .btn-link { border: 0; background: none; color: inherit; text-decoration: underline; cursor: pointer; margin-left: 8px; }
 
@@ -114,6 +115,7 @@ body { background: var(--bg); color: var(--text); }
   width: 100%; max-width: 380px; background: var(--panel); border-radius: 16px; padding: 20px;
   display: flex; flex-direction: column; gap: 12px;
 }
+.dialog h2 { margin: 0; font-size: 16px; }
 .dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 .dialog input {
   padding: 10px; border-radius: 8px; border: 1px solid var(--border);

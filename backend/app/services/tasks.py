@@ -21,7 +21,7 @@ from sqlalchemy import update
 
 from app.config import Settings
 from app.models import Conversation
-from app.services import summary
+from app.services import account, summary
 
 if TYPE_CHECKING:
     from app.context import AppContext
@@ -55,6 +55,7 @@ async def generate_title(ctx: AppContext, payload: dict) -> None:
 HANDLERS: dict[str, TaskHandler] = {
     "generate_title": generate_title,
     summary.TASK_NAME: summary.summarize_conversation,
+    account.TASK_NAME: account.purge_user,
 }
 
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, ApiError, Conversation, Me, Usage } from "./api";
 import AuthDialog from "./components/AuthDialog";
 import ChatPanel from "./components/ChatPanel";
+import DeleteAccountDialog from "./components/DeleteAccountDialog";
 import Sidebar from "./components/Sidebar";
 
 export default function App() {
@@ -13,6 +14,7 @@ export default function App() {
   const [panelKey, setPanelKey] = useState("new");
   const [usage, setUsage] = useState<Usage | null>(null);
   const [authOpen, setAuthOpen] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +70,13 @@ export default function App() {
     await refresh();
   };
 
+  const onAccountDeleted = async () => {
+    setDeleteOpen(false);
+    select(null);
+    setNotice("계정을 삭제했어요.");
+    await refresh();
+  };
+
   const logout = async (everywhere = false) => {
     try {
       await api.logout(everywhere);
@@ -93,6 +102,7 @@ export default function App() {
         onLogin={() => setAuthOpen(true)}
         onLogout={() => void logout()}
         onLogoutEverywhere={() => void logout(true)}
+        onDeleteAccount={() => setDeleteOpen(true)}
       />
       <main className="main">
         {error && <div className="banner banner-error">{error}</div>}
@@ -112,6 +122,9 @@ export default function App() {
       </main>
       {authOpen && (
         <AuthDialog onClose={() => setAuthOpen(false)} onAuthenticated={onAuthenticated} />
+      )}
+      {deleteOpen && (
+        <DeleteAccountDialog onClose={() => setDeleteOpen(false)} onDeleted={() => void onAccountDeleted()} />
       )}
     </div>
   );

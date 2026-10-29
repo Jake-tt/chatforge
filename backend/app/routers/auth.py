@@ -1,5 +1,7 @@
 import hashlib
 import hmac
+import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select, update
@@ -17,9 +19,20 @@ from app.deps import (
 )
 from app.errors import ApiError
 from app.models import Guest, User
-from app.schemas import AuthOut, ClaimOut, Credentials, GuestTokenOut, MeOut, UserOut
+from app.schemas import (
+    AuthOut,
+    ClaimOut,
+    Credentials,
+    GuestTokenOut,
+    MeOut,
+    PasswordConfirm,
+    UserOut,
+)
 from app.security import InvalidToken, create_token, decode_token, hash_password, verify_password
+from app.services import account
 from app.services.claim import ClaimResult, claim_guest, guest_subject, user_subject
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -157,3 +170,36 @@ async def logout_all(
     await session.execute(update(User).where(User.id == principal.id)
                           .values(token_version=User.token_version + 1))
     await session.commit()
+
+
+@router.delete("/me", status_code=202)
+async def delete_account(
+    body: PasswordConfirm,
+    principal: Principal = Depends(get_principal),
+    ctx: AppContext = Depends(get_ctx),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete the account: signed out everywhere and the email freed now, data purged by
+    a background task (`services.account`)."""
+    require_member(principal)
+    # A stolen token alone must not be enough, nor a way to guess the password.
+    bucket = _email_bucket(ctx, principal.email)
+    if await ctx.quota.hit_rate_limit(bucket, ctx.settings.login_failures_per_15min_per_email,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many failed attempts for this account", LOGIN_WINDOW_SECONDS)
+    user = await session.get(User, principal.id)
+    if not verify_password(body.password, user.password_hash):
+        raise ApiError(401, "invalid_credentials", "Password is incorrect")
+    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
+
+    await session.execute(update(User).where(User.id == user.id).values(
+        deleted_at=datetime.now(UTC), token_version=User.token_version + 1,
+        email=account.tombstone_email(user.id)))
+    await session.commit()
+    try:
+        await ctx.tasks.enqueue(account.TASK_NAME, {"user_id": str(user.id)})
+    except Exception:
+        # The account is already gone for the user; only the purge is late. The marked
+        # row says what's left to purge.
+        log.error("could not enqueue account purge", exc_info=True,
+                  extra={"user_id": str(user.id)})

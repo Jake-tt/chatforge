@@ -11,6 +11,7 @@ interface Props {
   onLogin: () => void;
   onLogout: () => void;
   onLogoutEverywhere: () => void;
+  onDeleteAccount: () => void;
 }
 
 export default function Sidebar(props: Props) {
@@ -73,6 +74,9 @@ export default function Sidebar(props: Props) {
               onClick={props.onLogoutEverywhere}
             >
               모든 기기
+            </button>
+            <button className="btn btn-ghost" onClick={props.onDeleteAccount}>
+              탈퇴
             </button>
           </div>
         ) : (
