@@ -37,6 +37,10 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
+    # Every token carries the version it was issued at; bumping it revokes them all.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Set when the account is deleted; its data is purged by a background task.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Guest(Base):
