@@ -167,7 +167,12 @@ export const api = {
 
   /** Sign out here; with `everywhere`, revoke this account's tokens on every device. */
   async logout(everywhere = false) {
-    if (everywhere) await authedFetch("/auth/logout-all", { method: "POST" }, false);
+    try {
+      if (everywhere) await authedFetch("/auth/logout-all", { method: "POST" }, false);
+    } catch (err) {
+      // Already signed out (revoked elsewhere, or expired): the goal is met.
+      if (!(err instanceof ApiError && err.status === 401)) throw err;
+    }
     storeToken(null);
   },
 

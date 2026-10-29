@@ -21,6 +21,9 @@ export default function DeleteAccountDialog({ onClose, onDeleted }: Props) {
     } catch (err) {
       if (err instanceof ApiError && err.code === "invalid_credentials") {
         setError("비밀번호가 맞지 않아요.");
+      } else if (err instanceof ApiError && err.status === 401) {
+        // This session was signed out meanwhile (e.g. from another device).
+        setError("세션이 끝났어요. 다시 로그인한 뒤 시도해 주세요.");
       } else if (err instanceof ApiError && err.code === "rate_limited") {
         setError("시도가 너무 많아요. 잠시 후 다시 시도해 주세요.");
       } else {

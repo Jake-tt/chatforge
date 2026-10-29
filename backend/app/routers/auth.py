@@ -45,6 +45,23 @@ def _too_many(ctx: AppContext, message: str, window_seconds: int) -> ApiError:
     return ApiError(429, "rate_limited", message, headers={"Retry-After": str(retry_after)})
 
 
+async def _check_password(ctx: AppContext, email: str, password: str, user: User | None,
+                          message: str) -> None:
+    """Verify a password under the per-account failure limit, shared by every endpoint
+    that takes one, so no endpoint adds guesses on top of another's.
+
+    The counter takes every attempt and is cleared on success, so it measures consecutive
+    failures. Checked before hashing, so it also caps the CPU an attacker can burn."""
+    bucket = _email_bucket(ctx, email)
+    if await ctx.quota.hit_rate_limit(bucket, ctx.settings.login_failures_per_15min_per_email,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many failed attempts for this account",
+                        LOGIN_WINDOW_SECONDS)
+    if not verify_password(password, user.password_hash if user else None):
+        raise ApiError(401, "invalid_credentials", message)
+    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
+
+
 def _email_bucket(ctx: AppContext, email: str) -> str:
     # Keyed by a keyed digest: a plain hash of an email is reversible with a list of emails.
     secret = ctx.settings.jwt_secret.get_secret_value().encode()
@@ -109,16 +126,9 @@ async def login(
         raise _too_many(ctx, "Too many login attempts from this address", LOGIN_WINDOW_SECONDS)
     # Emails are stored lowercased, so this hits the unique index.
     email = body.email.lower()
-    # Counts every attempt and is cleared on success, so it measures consecutive failures.
-    bucket = _email_bucket(ctx, email)
-    if await ctx.quota.hit_rate_limit(bucket, settings.login_failures_per_15min_per_email,
-                                      LOGIN_WINDOW_SECONDS):
-        raise _too_many(ctx, "Too many failed logins for this account", LOGIN_WINDOW_SECONDS)
-
     user = await session.scalar(select(User).where(User.email == email))
-    if not verify_password(body.password, user.password_hash if user else None):
-        raise ApiError(401, "invalid_credentials", "Email or password is incorrect")
-    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
+    await _check_password(ctx, email, body.password, user,
+                          "Email or password is incorrect")
     return await _finish_auth(ctx, session, user, body.guest_token)
 
 
@@ -183,14 +193,8 @@ async def delete_account(
     a background task (`services.account`)."""
     require_member(principal)
     # A stolen token alone must not be enough, nor a way to guess the password.
-    bucket = _email_bucket(ctx, principal.email)
-    if await ctx.quota.hit_rate_limit(bucket, ctx.settings.login_failures_per_15min_per_email,
-                                      LOGIN_WINDOW_SECONDS):
-        raise _too_many(ctx, "Too many failed attempts for this account", LOGIN_WINDOW_SECONDS)
     user = await session.get(User, principal.id)
-    if not verify_password(body.password, user.password_hash):
-        raise ApiError(401, "invalid_credentials", "Password is incorrect")
-    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
+    await _check_password(ctx, principal.email, body.password, user, "Password is incorrect")
 
     await session.execute(update(User).where(User.id == user.id).values(
         deleted_at=datetime.now(UTC), token_version=User.token_version + 1,
