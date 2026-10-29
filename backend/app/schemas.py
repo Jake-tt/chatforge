@@ -68,6 +68,7 @@ class CitationOut(BaseModel):
     title: str
     url: str
     snippet: str
+    cited: bool = True  # whether the answer cites it; rows stored before the check: yes
 
 
 class MessageOut(BaseModel):

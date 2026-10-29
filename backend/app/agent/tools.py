@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
 from app.config import Settings
-from app.services.rag import Citation, PastSearch, RagPipeline, render_sources
+from app.services.rag import Citation, PastSearch, RagPipeline, clip, render_sources
 from app.services.search import SearchHit
 
 
@@ -26,8 +26,12 @@ class ToolOutput:
         return cls(error=error)
 
     @classmethod
-    def of(cls, hits: list[SearchHit]) -> "ToolOutput":
-        return cls([{"title": h.title, "url": h.url, "snippet": h.text} for h in hits])
+    def of(cls, hits: list[SearchHit], char_budget: int) -> "ToolOutput":
+        # Split evenly: hits come ranked, but a later one may hold the answer. The stored
+        # snippet is the clipped one, so the sources shown are what the model saw.
+        per_hit = char_budget // max(len(hits), 1)
+        return cls([{"title": h.title, "url": h.url, "snippet": clip(h.text, per_hit)}
+                    for h in hits])
 
     def render(self, numbered: list[dict]) -> str:
         if self.error:
@@ -69,11 +73,13 @@ class Tool:
 def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
                 past: PastSearch | None) -> list[Tool]:
     tools: list[Tool] = []
+    budget = settings.tool_result_char_budget
     help_center = rag.search
     if help_center is not None:
         async def search_help(query: str) -> ToolOutput:
             async with asyncio.timeout(settings.search_timeout_seconds):
-                return ToolOutput.of(await help_center.search(query, settings.search_top_k))
+                hits = await help_center.search(query, settings.search_top_k)
+            return ToolOutput.of(hits, budget)
 
         tools.append(Tool("search_help", "Search the Chatforge help center: plans and daily "
                           "token limits, accounts and login, guest chats, deleting "
@@ -82,7 +88,7 @@ def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
     if past is not None:
         async def search_past(query: str) -> ToolOutput:
             async with asyncio.timeout(settings.search_timeout_seconds):
-                return ToolOutput.of(await past(query))
+                return ToolOutput.of(await past(query), budget)
 
         tools.append(Tool("search_past_conversations", "Search this user's own earlier "
                           "conversations for something they said or decided before.",
@@ -90,7 +96,7 @@ def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
 
     if account is not None:
         async def get_account() -> ToolOutput:
-            return ToolOutput.of([account])
+            return ToolOutput.of([account], budget)
 
         tools.append(Tool("get_account_usage", "This user's plan and today's token usage.",
                           NoArgs, get_account))

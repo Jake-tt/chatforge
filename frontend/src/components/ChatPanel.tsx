@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api, ApiError, Citation } from "../api";
+import { markCited, shownSources } from "../sources";
 
 interface Bubble {
   id: string;
@@ -92,6 +93,7 @@ export default function ChatPanel(props: Props) {
         ...b,
         pending: false,
         note: done.stop_reason === "refusal" ? "이 요청에는 답변할 수 없어요." : undefined,
+        citations: b.citations ? markCited(b.citations, done.cited) : b.citations,
       }));
     } catch (err) {
       if (received) {
@@ -137,7 +139,7 @@ export default function ChatPanel(props: Props) {
             {b.note && <div className="note">{b.note}</div>}
             {b.citations && b.citations.length > 0 && (
               <ol className="sources" aria-label="참고한 자료">
-                {b.citations.map((c) => (
+                {shownSources(b.citations).map((c) => (
                   <li key={c.n} value={c.n} title={c.snippet}>
                     {c.title}
                   </li>

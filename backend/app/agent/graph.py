@@ -35,7 +35,12 @@ from langgraph.runtime import Runtime
 from pydantic import Field, field_validator
 
 from app.agent.tools import Tool, ToolOutput
-from app.services.chat_models import stop_reason_of, to_messages, usage_from_message
+from app.services.chat_models import (
+    scratch_messages,
+    stop_reason_of,
+    to_messages,
+    usage_from_message,
+)
 from app.services.llm import ChatTurn, Usage
 from app.services.rag import ROUTER_SYSTEM, PastSearch, RagPipeline, RouteDecision
 from app.services.search import SearchHit
@@ -189,8 +194,12 @@ def _agent_turns(state: AgentState) -> list[ChatTurn]:
 
 async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     ctx = runtime.context
+    # The answering round keeps the breakpoint too: a cache is read only at a breakpoint
+    # (or a few blocks before one), so without it this round would resend every earlier
+    # tool result uncached to save a write premium on the newest one.
     messages = to_messages(ctx.system + TOOLS_NOTE, _agent_turns(state),
-                           cache=ctx.prompt_cache) + state.get("scratch", [])
+                           cache=ctx.prompt_cache) + \
+        scratch_messages(state.get("scratch", []), cache=ctx.prompt_cache)
     can_use_tools = bool(ctx.tools) and state.get("tool_rounds", 0) < ctx.max_tool_rounds
     model = ctx.model.bind_tools([t.as_openai() for t in ctx.tools]) if can_use_tools \
         else ctx.model

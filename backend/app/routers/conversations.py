@@ -32,7 +32,7 @@ from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
-from app.services.rag import PastSearch, account_snapshot
+from app.services.rag import PastSearch, account_snapshot, check_citations
 from app.services.search import SearchHit
 from app.services.turn_gate import Lease
 
@@ -133,7 +133,7 @@ async def send_message(
 ) -> StreamingResponse:
     """Store the user message, then stream the assistant reply as Server-Sent Events.
 
-    Events: `delta` {text} … then `done` {message_id, input_tokens, output_tokens,
+    Events: `delta` {text} … then `done` {message_id, input_tokens, output_tokens, cited,
     cache_read_tokens, cache_write_tokens, billed_tokens, stop_reason} or `error`
     {code, message, retryable}. `billed_tokens` is what the daily quota was charged.
     Quota/rate-limit failures are returned as plain HTTP 429 *before* the stream starts.
@@ -435,7 +435,8 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
         usage += suggestion_usage
         if questions:
             yield _sse("suggestions", {"questions": questions})
-    message_id = await _persist_reply(job, answer, usage, citations)
+    message = await _persist_reply(job, answer, usage, citations)
+    message_id = message.id if message else None
     if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
             "conversation_id": str(job.conversation_id), "first_message": job.first_message,
@@ -458,7 +459,21 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
         "cache_write_tokens": usage.cache_write_tokens,
         "billed_tokens": usage.billed(ctx.settings.token_weights()),
         "stop_reason": stop_reason,
+        "cited": [c["n"] for c in (message.citations if message else None) or []
+                  if c["cited"]],
     })
+
+
+def _checked_citations(job: ReplyJob, text: str, citations: list[dict] | None
+                       ) -> list[dict] | None:
+    if not citations and "[" not in text:
+        return citations
+    checked, missing = check_citations(text, citations or [])
+    if missing:
+        log.warning("answer cites missing sources", extra={
+            "missing": missing, "sources": len(checked),
+            "conversation_id": str(job.conversation_id)})
+    return checked or None
 
 
 async def _persist_reply(
@@ -466,8 +481,10 @@ async def _persist_reply(
     text: str,
     usage: Usage,
     citations: list[dict] | None,
-) -> uuid.UUID | None:
+) -> Message | None:
     """Store the assistant message and charge its tokens in one transaction.
+
+    Its citations are stored checked against the text (`check_citations`).
 
     With no text (the turn failed or was cancelled before anything reached the client)
     the user message is undone, so the conversation is as before the turn: the same
@@ -489,7 +506,7 @@ async def _persist_reply(
             message = Message(
                 conversation_id=conversation_id, seq=seq, role="assistant", content=text,
                 input_tokens=usage.prompt_tokens, output_tokens=usage.output_tokens,
-                citations=citations,
+                citations=_checked_citations(job, text, citations),
             )
             session.add(message)
         await ctx.quota.add_usage(session, principal.subject, billed)
@@ -501,4 +518,4 @@ async def _persist_reply(
         return None
     await ctx.history.append(principal.subject, conversation_id,
                              HistoryEntry(message.seq, "assistant", text))
-    return message.id
+    return message
