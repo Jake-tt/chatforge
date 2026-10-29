@@ -26,6 +26,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_ollama import ChatOllama
@@ -174,6 +175,30 @@ def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
             messages.append(HumanMessage(body(text, breakpoint)))
         else:
             messages.append(AIMessage(body(turn.content, breakpoint)))
+    return messages
+
+
+def scratch_messages(scratch: list[BaseMessage], *, cache: bool = False
+                     ) -> list[BaseMessage]:
+    """This turn's tool calls and results, to follow `to_messages`.
+
+    With `cache`, the newest tool result carries a breakpoint (the third of Anthropic's
+    four), so the next round reads every earlier result from the cache. As in
+    `to_messages`, every result is then sent as content blocks: a string result and a
+    block result serialize differently, and the next round must repeat this prefix
+    byte for byte."""
+    if not cache:
+        return list(scratch)
+    results = [i for i, m in enumerate(scratch) if isinstance(m, ToolMessage)]
+    newest = results[-1] if results else None
+    messages: list[BaseMessage] = []
+    for i, message in enumerate(scratch):
+        if isinstance(message, ToolMessage):
+            block = {"type": "text", "text": message.text}
+            if i == newest:
+                block["cache_control"] = _CACHE
+            message = message.model_copy(update={"content": [block]})
+        messages.append(message)
     return messages
 
 

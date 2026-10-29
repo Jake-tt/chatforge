@@ -20,6 +20,7 @@ export interface Citation {
   title: string;
   url: string;
   snippet: string;
+  cited?: boolean; // whether the answer cites it; absent until the answer is checked
 }
 export interface Message {
   id: string;
@@ -46,6 +47,7 @@ export interface StreamDone {
   input_tokens: number;
   output_tokens: number;
   stop_reason: string | null;
+  cited?: number[]; // source numbers the answer cites
 }
 
 export interface StreamHandlers {

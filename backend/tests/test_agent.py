@@ -474,3 +474,110 @@ async def test_api_errors_are_retryable_only_when_a_retry_can_succeed(make_harne
     result = await h.chat(headers, cid, "안녕")
 
     assert result.last("error")["retryable"] is retryable
+
+
+class LongSearch:
+    """Help-center hits far longer than any budget, like a page pasted whole."""
+
+    async def search(self, query: str, limit: int) -> list[SearchHit]:
+        return [SearchHit(f"help#{i}", f"문서 {i}", f"/help/{i}", "가" * 5000, 1.0)
+                for i in range(3)]
+
+
+async def test_tool_results_fit_the_character_budget(make_harness):
+    # Without a budget one tool round can put tens of thousands of characters in front of
+    # the model, and every later round sends them again.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()],
+        agent=[tool_call("search_help", query="한도"), _answer("답 [1]")],
+        search=LongSearch(), tool_result_char_budget=900)
+
+    result = await h.chat(headers, cid, "한도")
+
+    tool_result = agent.calls[-1]["messages"][-1].content
+    assert tool_result.count("가") <= 900
+    # What the user sees as a source is what the model saw.
+    assert all(len(c["snippet"]) <= 301 for c in _citations(result))
+
+
+async def test_past_conversation_results_fit_the_character_budget(make_harness):
+    # This tool returned whole messages, the longest results the agent could get.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(), _route()],
+        agent=[_answer("기억해 둘게요"),
+               tool_call("search_past_conversations", query="여행 숙소"), _answer("답 [1]")],
+        tool_result_char_budget=300)
+    await h.chat(headers, cid, "여행 숙소 메모: " + "해운대 " * 400)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, "숙소 어디로 했더라")
+
+    assert _citations(result) and all(len(c["snippet"]) <= 301 for c in _citations(result))
+
+
+async def test_tool_rounds_mark_the_latest_result_for_caching(make_harness):
+    # Each round resends every earlier tool result; a breakpoint on the newest one lets
+    # the next round read them from the cache instead of paying for them again.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()],
+        agent=[tool_call("search_help", query="한도"), tool_call("search_help", query="삭제"),
+               _answer("답 [1]")],
+        llm_provider="anthropic", anthropic_api_key="test", agent_max_tool_rounds=2)
+
+    await h.chat(headers, cid, "한도와 삭제")
+
+    second, third = agent.calls[1]["messages"], agent.calls[2]["messages"]
+    assert second[-1].content[-1]["cache_control"] == {"type": "ephemeral"}
+    # The first round's result moved behind the breakpoint but serializes the same.
+    first_result = third[len(second) - 1]
+    assert isinstance(first_result, ToolMessage)
+    assert first_result.content == [{"type": "text", "text": second[-1].content[-1]["text"]}]
+    # The answering round too: its breakpoint is where it reads the earlier rounds' cache.
+    assert third[-1].content[-1]["cache_control"] == {"type": "ephemeral"}
+    marked = [m for m in third if isinstance(m.content, list)
+              and any("cache_control" in b for b in m.content)]
+    assert len(marked) <= 4  # Anthropic's limit per request
+
+
+async def test_tool_results_stay_plain_text_without_prompt_caching(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route()],
+        agent=[tool_call("search_help", query="한도"), _answer("답")])
+
+    await h.chat(headers, cid, "한도")
+
+    assert isinstance(agent.calls[-1]["messages"][-1].content, str)
+
+
+async def test_sources_record_whether_the_answer_cited_them(make_harness, caplog):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness,
+        routes=[_route(needs_search=True, query="무료 요금제 하루 토큰 한도")],
+        agent=[_answer("무료는 하루 200,000 토큰입니다 [1]. 자세한 건 [9] 참고.")])
+
+    with caplog.at_level("WARNING"):
+        result = await h.chat(headers, cid, "무료 한도?")
+
+    assert len(_citations(result)) > 1
+    assert result.last("done")["cited"] == [1]
+    stored = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
+    citations = stored["messages"][-1]["citations"]
+    assert [c["cited"] for c in citations] == [c["n"] == 1 for c in citations]
+    assert result.last("done")["cited"] == [c["n"] for c in citations if c["cited"]]
+    # [9] points at nothing: the answer is already on screen, so it's flagged, not edited.
+    dangling = [r for r in caplog.records if r.getMessage() == "answer cites missing sources"]
+    assert dangling and dangling[0].missing == [9]
+
+
+async def test_sources_stored_before_the_check_count_as_cited(make_harness):
+    from app.models import Message
+    h, agent, headers, cid = await _agent_harness(make_harness, routes=[], agent=[])
+    async with h.ctx.sessionmaker() as session:
+        session.add(Message(conversation_id=uuid.UUID(cid), seq=1, role="assistant",
+                            content="예전 답 [1]", citations=[
+                                {"n": 1, "title": "t", "url": "/u", "snippet": "s"}]))
+        await session.commit()
+
+    stored = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
+
+    assert stored["messages"][0]["citations"][0]["cited"] is True
