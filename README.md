@@ -231,7 +231,7 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 - **해결**
   - 팀 대응: 7분 뒤 fix-forward PR로 복구. 이후 위험도별 머지 규칙과, CI 통과를 확인한 뒤에만 머지하는 절차 마련
   - 제 작업: 제가 맡은 백엔드 저장소의 작업 규칙에 같은 절차를 도입(2026-05-26)
-- **chatforge**: [`CLAUDE.md`](CLAUDE.md)의 PR 머지 정책. 이 저장소의 PR도 `gh pr checks --watch`로 CI 통과를 확인한 뒤 머지했습니다.
+- **chatforge**: 문서 규칙 대신 구조로 막았습니다. `main`을 GitHub ruleset으로 보호해 CI 필수 체크를 통과해야만 머지되므로 `--auto`도 CI를 기다립니다. Claude Code에서는 `gh pr merge`가 항상 사람의 승인을 거칩니다([`.claude/settings.json`](.claude/settings.json)).
 
 ## 로컬 실행
 
@@ -330,18 +330,20 @@ deploy/                # GCP 셋업·배포 스크립트
 
 이 프로젝트는 Claude Code와 함께 개발했습니다. [`CLAUDE.md`](CLAUDE.md)는 실무에서 AI 코딩 에이전트와 일하며 정리한 규칙을 이 저장소에 맞게 옮긴 것입니다.
 
-- **비용 통제**: 과금될 수 있는 작업은 사전 승인을 받도록 에이전트를 제한
+- **지침과 강제의 분리**: 모델이 판단할 지침은 `CLAUDE.md`와 경로별 [`.claude/rules/`](.claude/rules)에, 예외가 없어야 하는 규칙은 [`.claude/settings.json`](.claude/settings.json)의 권한 규칙과 hook에 둠
+- **비용 통제**: `LLM_PROVIDER=anthropic` 실행, `deploy/*.sh`, `gcloud`는 hook과 권한 규칙이 항상 사람의 승인을 받게 함
+- **완료 게이트**: 턴을 끝낼 때 Stop hook이 바뀐 영역의 린트·테스트·결정 연결 검사를 돌리고, 실패하면 종료를 막음
 - **작업 단위**: Vertical / Contract-First / Risk-First 슬라이싱, "revert하면 한 가지 의도만 되돌려지는가"로 커밋 크기 판단
 - **검증 게이트**: Red/Green TDD, 검증 후 커밋, 린트·테스트 게이트를 건너뛰지 않기, 외부 경계만 mock
 - **에이전트 결과 검증**: 서브에이전트의 "없다"는 보고는 직접 확인
-- **머지 정책**: branch protection이 없는 환경에서 `--auto` 머지가 CI를 기다리지 않아 기본 브랜치가 깨진 실제 사고를 계기로 만든 위험도별 머지 규칙
+- **머지 정책**: branch protection이 없는 환경에서 `--auto` 머지가 CI를 기다리지 않아 기본 브랜치가 깨진 실제 사고를 계기로, 이 저장소는 ruleset의 필수 상태 체크로 막음
 - **Claude 자산 관리**: 규칙, skill, subagent 중 무엇으로 만들지 판단하는 결정 트리
 
 ### 에이전트 워크플로 (`.claude/skills/`)
 
 | skill | 역할 |
 |---|---|
-| `code-review` | 변경 범위(BACKEND, DATABASE, LLM, FRONTEND, DECISIONS, INFRA)별 전문가 에이전트를 병렬 실행하고, 확신도로 분류한 뒤 기계적 문제는 먼저 고치고 판정 리포트를 냄. "단위 테스트에 mock이 몇 개 필요한가"로 테스트 가능성을 판정 |
+| `pr-review` | 변경 범위(BACKEND, DATABASE, LLM, FRONTEND, DECISIONS, INFRA)별 전문가 에이전트를 병렬 실행하고, 확신도로 분류한 뒤 기계적 문제는 먼저 고치고 판정 리포트를 냄. "단위 테스트에 mock이 몇 개 필요한가"로 테스트 가능성을 판정 |
 | `decision-interview` | 구현 전에 기존 결정을 먼저 검색하고, 정할 것만 한 번에 하나씩 추천안과 함께 질문 |
 | `verification-plan` | 결정별 위험도에 따라 검증 패키지(Minimal / Standard / Strict) 하나를 합의 |
 | `delivery-plan` | 작업을 Vertical 조각으로 나누고 에이전트 단독 진행(AFK)과 사람 개입(HITL)을 구분 |

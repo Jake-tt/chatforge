@@ -22,6 +22,6 @@ python scripts/decisions.py coverage --details                           # 결�
 ## 워크플로 (`.claude/skills/`)
 
 ```
-decision-interview → verification-plan → delivery-plan → (구현: decision-map 참조) → code-review
+decision-interview → verification-plan → delivery-plan → (구현: decision-map 참조) → pr-review
                                                              ↘ extract-test-decisions / promote-decisions
 ```
