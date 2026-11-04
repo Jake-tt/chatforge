@@ -52,7 +52,7 @@ AI 에이전트와 사람이 같은 기준으로 작업하기 위한 저장소 �
 - **Mock 경계**: 외부 경계만 mock한다. LLM(`ScriptedChatModel`·`RecordingChatModel`·`FakeProvider`), Redis(`fakeredis`), 검색(`SearchProvider` 스텁), Cloud Tasks(기록용 큐), 시간. 동작 변경은 서비스를 직접 부르지 말고 HTTP API(`tests/conftest.py`의 `Harness`)로 테스트한다. 서킷 브레이커처럼 내부 동작 자체가 대상일 때만 예외다.
 - 테스트가 실패하면 스텁과 fake가 실제 인터페이스(LangChain `BaseChatModel`, `LLMProvider`, `SearchProvider`)와 맞는지도 확인한다.
 - 서브에이전트가 "없다", "적용 안 됨"이라고 보고한 것은 직접 파일을 읽어 확인한다. 부재 주장은 오탐이 잦다.
-- 계획을 문서로 남겨 달라는 요청은 `plan/YYMMDD_대상.md`(gitignore된 개인 메모)에 저장한다. skill이 만드는 계획과 작업 단위는 `decision-docs/plans/`, `issues/`에 둔다.
+- 계획을 문서로 남겨 달라는 요청은 `plan/YYMMDD_대상.md`에 저장하고 커밋한다. 결정 기록의 `doc_refs`가 이 문서를 가리키므로 공개해도 되는 내용만 적는다. skill이 만드는 계획과 작업 단위는 `decision-docs/plans/`, `issues/`에 둔다.
 
 ## PR 머지 정책
 
