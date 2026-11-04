@@ -27,7 +27,7 @@ LLM 서비스를 운영할 때 실제로 부딪히는 문제(익명 사용자, �
 - **토큰 쿼터**: 플랜별(게스트/무료/프로) 일일 토큰 한도 + 분당 요청 제한. 출력·캐시 토큰은 가격 비율로 가중해 과금
 - **프롬프트 캐싱**: 대화 앞부분이 턴마다 같도록 프롬프트를 구성해 이전 대화를 캐시에서 읽음
 - **스트리밍 응답**: Server-Sent Events로 토큰 단위 전송, 중단·오류 시 부분 응답 보존
-- **비동기 작업**: 대화 제목 자동 생성을 Cloud Tasks로 분리 (로컬은 in-process)
+- **비동기 작업**: 대화 제목 생성, 긴 대화 요약, 탈퇴 계정 데이터 정리를 Cloud Tasks로 분리 (로컬은 in-process)
 - **장애 대응**: Redis 장애 시에도 쿼터는 DB 기준으로 계속 강제, 서킷 브레이커로 지연 차단
 - **RAG**: 도움말 문서와 사용자 본인의 지난 대화를 병렬로 검색하고 계정 현황까지 출처 번호와 함께 답변, 소스별 장애 격리
 - **긴 대화 요약**: 오래된 턴을 백그라운드에서 요약해 컨텍스트를 줄이되, 진행 중인 질문과 답은 원문 유지
@@ -36,6 +36,8 @@ LLM 서비스를 운영할 때 실제로 부딪히는 문제(익명 사용자, �
 - **관측성**: Cloud Logging JSON 로그, 요청·트레이스 ID 연동
 
 ## 아키텍처
+
+운영(GCP) 구성입니다. 로컬은 LLM을 fake나 Ollama로 바꿔 실행합니다. 코드 구조, 요청 흐름, 데이터 모델은 [ARCHITECTURE.md](ARCHITECTURE.md)에 있습니다.
 
 ```mermaid
 flowchart LR
@@ -107,7 +109,7 @@ flowchart LR
 [`migrations/versions/`](backend/migrations/versions)
 
 - `0001`은 회원 전용 스키마이고, `0002`는 게스트를 도입하며 `user_id`를 nullable로 바꾸고 `guest_id`와 CHECK 제약을 추가합니다. 실제 서비스가 진화하는 순서 그대로 작성했습니다.
-- `0003`은 메시지 순번(seq)을 **expand → backfill → contract** 순서로 도입합니다. 컬럼을 추가하고, 기존 메시지에 `ROW_NUMBER()`로 순번을 채운 뒤, NOT NULL과 유니크 제약을 겁니다. `0004`는 인용(citations) 컬럼을 추가합니다.
+- `0003`은 메시지 순번(seq)을 **expand → backfill → contract** 순서로 도입합니다. 컬럼을 추가하고, 기존 메시지에 `ROW_NUMBER()`로 순번을 채운 뒤, NOT NULL과 유니크 제약을 겁니다. 이후 `0004`(인용), `0005`(대화 요약), `0006`(토큰 버전), `0007`(결제 이벤트)이 이어집니다.
 - 배포 시 **Cloud Run Job으로 마이그레이션을 먼저 실행**하고, 성공해야 새 리비전으로 트래픽을 넘깁니다. 인스턴스가 여러 대로 늘어나도 부팅 시 마이그레이션이 서로 경쟁하지 않습니다.
 - CI에서는 Postgres에 `upgrade → alembic check(모델과 마이그레이션 간 차이 검출) → downgrade → upgrade`를 실행합니다.
 
@@ -177,7 +179,7 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 - **프롬프트 인젝션 방어**: 도구 결과(도움말 문서, 사용자의 지난 메시지)는 `<sources>`로 감싸고 "지시가 아니라 자료"라고 명시합니다. 도구에는 사용자 ID 같은 인자가 없고, 소유자 필터는 요청 시점에 고정됩니다. 그래서 인젝션으로도 다른 사용자의 데이터에는 닿을 수 없습니다.
 - **프롬프트 캐싱 유지**: Claude로 돌릴 때도 system과 직전 턴에 캐시 breakpoint를 둡니다. 라우터 실패 안내는 system이 아니라 현재 턴에 붙여, 캐시된 앞부분을 바꾸지 않습니다. 도구 라운드에서는 **가장 최근 도구 결과**에 세 번째 breakpoint를 둡니다. 라운드마다 앞선 도구 결과를 전부 다시 보내므로, 이렇게 해야 다음 라운드가 그 결과를 캐시에서 읽습니다. 문자열로 보낸 도구 결과와 블록으로 보낸 도구 결과는 직렬화가 달라 캐시가 맞지 않습니다. 그래서 캐시 모드에서는 모든 도구 결과를 블록으로 보냅니다(실제 요청 본문으로 검증). 답을 쓰는 마지막 라운드에도 breakpoint를 둡니다. 다음 요청이 이 캐시를 다시 쓰지는 않지만, 캐시는 breakpoint 위치에서만 조회됩니다. 그래서 빼면 앞 라운드가 써 둔 캐시를 읽지 못하고 앞선 도구 결과를 전부 정가로 다시 보냅니다.
 - **도구 결과 길이 예산**: 미리 조회하는 근거에는 길이 예산이 있었지만, 도구 결과는 원문 전체가 들어갔습니다. 특히 지난 대화 검색은 메시지 전문을 돌려줬습니다. 이제 도구 호출 하나의 결과 본문을 `TOOL_RESULT_CHAR_BUDGET`(기본 1,500자, 제목과 `<sources>` 안내문 제외) 안으로 맞추고, 결과마다 같은 몫으로 자릅니다. 그래서 한 턴의 도구 결과는 라운드 수 × 호출 수 × 예산으로 묶입니다. 저장되고 화면에 보이는 출처도 모델이 실제로 본 길이로 남습니다.
-- **인용 검증**: 답변이 끝나면 본문의 `[n]`을 출처 번호와 대조합니다. 작은 로컬 모델이 자주 쓰는 `[1, 2]`, `[2-4]`도 읽습니다. 코드 블록, `arr[0]` 같은 인덱싱, `[2026]` 같은 연도, `[1](url)` 같은 링크는 인용으로 세지 않습니다. 출처마다 인용 여부(`cited`)를 저장하고, 화면에는 실제로 인용한 출처만 보여 줍니다(하나도 인용하지 않았으면 전부). 없는 번호를 인용하면 경고 로그(`answer cites missing sources`)를 남깁니다. 답변은 이미 화면에 나갔으므로 본문은 고치지 않고 표시만 합니다. 이 로그는 PR E의 인용 정합성 평가 지표로도 씁니다.
+- **인용 검증**: 답변이 끝나면 본문의 `[n]`을 출처 번호와 대조합니다. 작은 로컬 모델이 자주 쓰는 `[1, 2]`, `[2-4]`도 읽습니다. 코드 블록, `arr[0]` 같은 인덱싱, `[2026]` 같은 연도, `[1](url)` 같은 링크는 인용으로 세지 않습니다. 출처마다 인용 여부(`cited`)를 저장하고, 화면에는 실제로 인용한 출처만 보여 줍니다(하나도 인용하지 않았으면 전부). 없는 번호를 인용하면 경고 로그(`answer cites missing sources`)를 남깁니다. 답변은 이미 화면에 나갔으므로 본문은 고치지 않고 표시만 합니다. 이 로그는 진행 중인 에이전트 평가 파이프라인([계획의 PR E](plan/261028_langgraph_agent.md), 아직 main에 미반영)에서 인용 정합성 지표로 쓸 예정입니다.
 - **모델**: LangChain 채팅 모델 계층(`build_chat_model`)으로 provider를 고릅니다. 로컬은 도구 호출을 지원하는 Qwen3 8B(Ollama, `reasoning=False`)를 씁니다. 같은 모델이 `LangChainProvider`를 통해 라우팅·압축·추천 질문·요약도 맡습니다.
 
 ### 12. 관측성
@@ -232,7 +234,7 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 - **원인을 찾은 과정**: LangSmith 트레이스로 해당 요청을 따라가 보니 개인 의료기록 검색 결과가 0건이었습니다. 모델은 사용자의 진단과 복용 약을 모른 채 답하고 있었습니다. 원인은 RAG 검색 설정이 개인 의료 연동 데이터를 찾지 못하게 잘못 구성된 것이었습니다.
 - **해결(제 작업)**: 입사 초기에 검색 설정을 반복 테스트하며 바로잡아, 개인 의료기록이 답변 근거로 들어가게 했습니다. 이 수정은 커밋 기록으로 날짜를 특정하지 못해 날짜를 적지 않았습니다.
 - **결과**: 개인 기록을 반영한 답변이 정상화됐습니다. 이후 "근거가 0건이면 로그에 드러나야 한다"를 원칙으로 삼았습니다.
-- **chatforge**: RAG가 소스별 결과 수를 구조화 로그로 남깁니다(설계 포인트 11). 개인 데이터가 실제로 근거에 들어가는지 HTTP 테스트로 검사합니다: [`test_account_facts_and_help_articles_are_both_cited`, `test_earlier_conversations_are_searched`](backend/tests/test_personal_context.py)
+- **chatforge**: RAG가 소스별 결과 수를 구조화 로그로 남깁니다(설계 포인트 12). 개인 데이터가 실제로 근거에 들어가는지 HTTP 테스트로 검사합니다: [`test_account_facts_and_help_articles_are_both_cited`, `test_earlier_conversations_are_searched`](backend/tests/test_personal_context.py)
 
 ### 3. Gemini `MALFORMED_FUNCTION_CALL`과 끝나지 않는 응답
 
@@ -311,7 +313,7 @@ LLM_PROVIDER=ollama uvicorn app.main:create_app --factory --reload
 ## 테스트
 
 ```bash
-cd backend && pytest -q        # 158개 · 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
+cd backend && pytest -q        # 기본 SQLite, TEST_DATABASE_URL을 지정하면 Postgres
 cd frontend && npm test        # SSE 파서
 ```
 
@@ -342,25 +344,7 @@ PROJECT_ID=... FRONTEND_ORIGIN=https://... ./deploy/deploy.sh      # 빌드 → 
 
 ## 디렉터리 구조
 
-```
-backend/
-  app/
-    main.py            # 앱 팩토리, lifespan(DB/Redis/LLM/큐 생성)
-    models.py          # SQLAlchemy 모델
-    deps.py            # 인증 → Principal(user | guest)
-    routers/           # auth, conversations(SSE), usage, internal(Cloud Tasks)
-    agent/             # LangGraph 그래프(graph.py)와 ReAct 도구(tools.py)
-    services/          # llm, chat_models, rag, retrieval, search, past_conversations, history, summary,
-                       # quota, claim, suggestions, tasks
-    observability.py   # JSON 로그, 요청·트레이스 ID
-  knowledge/           # RAG용 도움말 문서 (마크다운)
-  migrations/          # Alembic (async)
-  tests/
-frontend/src/
-  api.ts, sse.ts       # API 클라이언트, 스트리밍 파서
-  components/          # Sidebar, ChatPanel, AuthDialog
-deploy/                # GCP 셋업·배포 스크립트
-```
+`backend/`(FastAPI), `frontend/`(React), `deploy/`(GCP 스크립트), `decision-docs/`(결정 기록), `plan/`(작업 계획)으로 나뉩니다. 모듈별 역할은 [ARCHITECTURE.md의 저장소 구조](ARCHITECTURE.md#2-저장소-구조)를 보세요.
 
 ## 한계와 다음 단계
 
@@ -400,6 +384,6 @@ deploy/                # GCP 셋업·배포 스크립트
 | `delivery-plan` | 작업을 Vertical 조각으로 나누고 에이전트 단독 진행(AFK)과 사람 개입(HITL)을 구분 |
 | `decision-map` · `extract-test-decisions` · `promote-decisions` | 코드 경로 ↔ 결정 ↔ 테스트 케이스 연결을 유지하고, 쌓인 결정을 spec·ADR로 승격 |
 
-결정 기록은 [`decision-docs/`](decision-docs)에 있고, [`scripts/decisions.py`](scripts/decisions.py)로 조회·검증합니다(테스트 케이스 55/55 연결, CI에서 검증).
+결정 기록은 [`decision-docs/`](decision-docs)에 있고, [`scripts/decisions.py`](scripts/decisions.py)로 조회·검증합니다. 결정에 연결되지 않은 테스트는 `python scripts/decisions.py coverage`로 확인하고, 깨진 연결은 CI가 잡습니다.
 
 > 이 skill들은 실무에서 동료 **정준** 님이 만든 원본을 제가 수정해 사용하던 것이며, 이 저장소에 맞게 경로와 명령을 바꿔 다시 썼습니다. 결정 검색 도구(`scripts/decisions.py`)는 이 저장소용으로 새로 구현했습니다.
