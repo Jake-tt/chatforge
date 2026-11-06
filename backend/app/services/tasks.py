@@ -92,8 +92,11 @@ class InlineTaskQueue:
 
     async def drain(self) -> None:
         """Wait for in-flight tasks (used by tests and graceful shutdown)."""
-        while self._running:
-            await asyncio.gather(*self._running, return_exceptions=True)
+        # Only unfinished tasks: a finished one leaves `_running` in its done callback, on
+        # the next loop pass, and gathering finished tasks returns without yielding to the
+        # loop, so waiting on it would spin forever.
+        while pending := [t for t in self._running if not t.done()]:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def close(self) -> None:
         for task in self._delayed:

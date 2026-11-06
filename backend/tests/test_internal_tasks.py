@@ -1,6 +1,7 @@
 """Cloud Tasks callback endpoint (/internal/tasks/{name}) and the in-process queue."""
 
 import asyncio
+import threading
 
 import pytest
 
@@ -97,3 +98,23 @@ async def test_closing_the_inline_queue_drops_delayed_tasks(monkeypatch):
     await asyncio.sleep(0.1)
 
     assert ran == []
+
+
+def test_drain_returns_when_a_task_finished_but_was_not_yet_removed():
+    # A finished task leaves `_running` only in its done callback, on the next loop pass.
+    # Drain called in between once spun forever: gather() over finished tasks returns
+    # without yielding, so the callback never ran (CI hung on Postgres after a purge).
+    async def drain_with_a_finished_task() -> None:
+        queue = InlineTaskQueue(lambda: None)
+        finished = asyncio.get_running_loop().create_future()
+        finished.set_result(None)
+        queue._running.add(finished)  # the state between finishing and the callback
+        await queue.drain()
+
+    # A spinning drain never yields, so an asyncio timeout can't stop it: use a thread.
+    worker = threading.Thread(target=asyncio.run, args=(drain_with_a_finished_task(),),
+                              daemon=True)
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive(), "drain() spun on a task that had already finished"
