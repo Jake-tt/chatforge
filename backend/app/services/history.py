@@ -35,18 +35,21 @@ class HistoryEntry:
     seq: int
     role: str
     content: str
+    kind: str = "answer"
 
     def to_turn(self) -> ChatTurn:
         return ChatTurn(self.role, self.content)
 
 
 def _encode(entry: HistoryEntry) -> str:
-    return json.dumps({"s": entry.seq, "r": entry.role, "c": entry.content}, ensure_ascii=False)
+    return json.dumps({"s": entry.seq, "r": entry.role, "c": entry.content, "k": entry.kind},
+                      ensure_ascii=False)
 
 
 def _decode(raw: str) -> HistoryEntry:
     d = json.loads(raw)
-    return HistoryEntry(d["s"], d["r"], d["c"])
+    # Entries cached before kinds were stored have none; they were all answers.
+    return HistoryEntry(d["s"], d["r"], d["c"], d.get("k", "answer"))
 
 
 class HistoryCache:
@@ -73,7 +76,7 @@ class HistoryCache:
             .order_by(Message.seq.desc())
             .limit(self._limit)
         )
-        entries = [HistoryEntry(m.seq, m.role, m.content) for m in rows][::-1]
+        entries = [HistoryEntry(m.seq, m.role, m.content, m.kind) for m in rows][::-1]
         if entries:
             await self._guard.call(lambda r: self._fill(r, key, entries), None)
         return entries

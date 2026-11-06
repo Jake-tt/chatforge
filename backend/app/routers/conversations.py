@@ -172,6 +172,7 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
     boundary = summary.summarized_through(settings, conversation)
     turns = _to_turns([e for e in recent if e.seq > boundary])
+    after_clarify = _follows_clarify(recent, seq)
     is_first_message = seq == 1 and conversation.title is None
     system = summary.system_prompt(settings, conversation)
     # The quota just checked is the user's current usage; no need to read it again.
@@ -180,7 +181,8 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
         else None
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
-                   is_first_message, account, past, user_seq=seq, lease=lease)
+                   is_first_message, account, past, user_seq=seq, lease=lease,
+                   after_clarify=after_clarify)
     return TurnResponse(job, TurnProgress())
 
 
@@ -211,6 +213,12 @@ async def _allocate_seq(session: AsyncSession, conversation_id: uuid.UUID, **val
         .values(message_count=Conversation.message_count + 1, **values)
         .returning(Conversation.message_count)
     )
+
+
+def _follows_clarify(recent: list[HistoryEntry], user_seq: int) -> bool:
+    """Whether the message just before this turn's user message was a clarifying question."""
+    return any(e.seq == user_seq - 1 and e.role == "assistant" and e.kind == "clarify"
+               for e in recent)
 
 
 def _to_turns(entries: list[HistoryEntry]) -> list[ChatTurn]:
@@ -257,6 +265,7 @@ class ReplyJob:
     past: PastSearch | None
     user_seq: int = 0  # the user message this turn answers; undone if nothing is shown
     lease: Lease | None = None  # admission held for the turn, released when it ends
+    after_clarify: bool = False  # the previous assistant turn asked the user back
 
 
 # Writes that must outlive a cancelled request. `asyncio.shield` keeps no strong reference
@@ -350,7 +359,7 @@ async def _run_agent(job: ReplyJob) -> AsyncIterator[str]:
         deadline = asyncio.get_running_loop().time() + ctx.settings.agent_turn_timeout_seconds
         async with aclosing(ctx.agent.astream(
             {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
-             "usage": Usage()},
+             "usage": Usage(), "after_clarify": job.after_clarify},
             context=_agent_context(job), stream_mode=["messages", "updates"],
         )) as graph_events:
             while True:
@@ -383,6 +392,7 @@ async def _run_agent(job: ReplyJob) -> AsyncIterator[str]:
     async for event in _finish_reply(
         job, stream.turns, stream.text, stream.usage, stream.citations or None,
         stream.stop_reason, followups=not stream.clarified, summarize=not stream.clarified,
+        options=stream.options if stream.clarified else None,
     ):
         yield event
 
@@ -423,19 +433,23 @@ def _wants_followups(ctx: AppContext, answer: str, stop_reason: str | None,
 async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
                         citations: list[dict] | None, stop_reason: str | None, *,
                         followups: bool = True, summarize: bool = True,
+                        options: list[str] | None = None,
                         ) -> AsyncIterator[str]:
-    """Suggestions, storage and billing, background tasks, then `done`.
+    """Suggestions or clarify options, storage and billing, background tasks, then `done`.
 
-    A clarifying turn passes `followups=False, summarize=False`: suggestions would answer
-    for the user, and summarizing would fold the open question away.
+    A clarifying turn passes `followups=False, summarize=False` and its `options`:
+    suggestions would answer for the user, and summarizing would fold the open question
+    away. Its options take the place of suggestions.
     """
     ctx = job.ctx
+    if options is not None:
+        yield _sse("clarify", {"options": options})
     if _wants_followups(ctx, answer, stop_reason, followups):
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
         usage += suggestion_usage
         if questions:
             yield _sse("suggestions", {"questions": questions})
-    message = await _persist_reply(job, answer, usage, citations)
+    message = await _persist_reply(job, answer, usage, citations, options=options)
     message_id = message.id if message else None
     if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
@@ -481,6 +495,8 @@ async def _persist_reply(
     text: str,
     usage: Usage,
     citations: list[dict] | None,
+    *,
+    options: list[str] | None = None,
 ) -> Message | None:
     """Store the assistant message and charge its tokens in one transaction.
 
@@ -511,6 +527,7 @@ async def _persist_reply(
                 return None
             message = Message(
                 conversation_id=conversation_id, seq=seq, role="assistant", content=text,
+                kind="answer" if options is None else "clarify", options=options,
                 input_tokens=usage.prompt_tokens, output_tokens=usage.output_tokens,
                 citations=_checked_citations(job, text, citations),
             )
@@ -523,5 +540,5 @@ async def _persist_reply(
             await ctx.history.invalidate(principal.subject, conversation_id)
         return None
     await ctx.history.append(principal.subject, conversation_id,
-                             HistoryEntry(message.seq, "assistant", text))
+                             HistoryEntry(message.seq, "assistant", text, message.kind))
     return message

@@ -41,6 +41,20 @@ async def test_context_is_read_from_cache_when_complete(make_harness):
     assert llm.contents() == ["from-cache", "reply 1", "two"]
 
 
+async def test_entries_cached_before_message_kinds_still_read(make_harness):
+    h, llm, headers, cid, key = await _setup(make_harness)
+    await h.chat(headers, cid, "one")
+    # A cache written by the previous release has no kind field.
+    for i, raw in enumerate(await h.ctx.redis.lrange(key, 0, -1)):
+        entry = json.loads(raw)
+        entry.pop("k")
+        await h.ctx.redis.lset(key, i, json.dumps({**entry, "c": f"old-{entry['c']}"}))
+
+    await h.chat(headers, cid, "two")
+
+    assert llm.contents() == ["old-one", "old-reply 1", "two"]
+
+
 async def test_gap_in_cache_falls_back_to_database(make_harness):
     h, llm, headers, cid, key = await _setup(make_harness)
     await h.chat(headers, cid, "one")

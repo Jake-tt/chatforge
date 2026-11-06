@@ -80,7 +80,10 @@ class MessageOut(BaseModel):
 
     id: uuid.UUID
     role: str
+    kind: str = "answer"
     content: str
+    # Offered with a clarifying question ([] asks for free text); None for an answer.
+    options: list[str] | None = None
     input_tokens: int
     output_tokens: int
     citations: list[CitationOut] | None = None
