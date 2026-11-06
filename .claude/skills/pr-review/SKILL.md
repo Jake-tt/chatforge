@@ -1,9 +1,9 @@
 ---
-name: code-review
+name: pr-review
 description: main 대비 변경 사항을 범위별 전문가 에이전트로 병렬 리뷰하고, 확실한 문제는 고친 뒤 판정 리포트를 낸다. PR 생성이나 push 요청 전에 반드시 먼저 실행한다.
 ---
 
-# Code Review: PR 전 AI 코드 리뷰와 품질 개선
+# PR Review: PR 전 AI 코드 리뷰와 품질 개선
 
 > 원작: 정준 · 수정: jake-tt (chatforge의 경로, 명령, 규칙에 맞게 재작성)
 
@@ -157,6 +157,6 @@ PASS 또는 PASS WITH WARNINGS일 때만 PR을 만든다. 머지 방식은 CLAUD
 ## 사용법
 
 ```
-/code-review           # main 대비 전체 리뷰
-/code-review --quick   # 상시 전문가 + Security만, SUGGESTION 생략
+/pr-review           # main 대비 전체 리뷰
+/pr-review --quick   # 상시 전문가 + Security만, SUGGESTION 생략
 ```

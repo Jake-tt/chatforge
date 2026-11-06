@@ -23,6 +23,8 @@ export default function AuthDialog({ onClose, onAuthenticated }: Props) {
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
         setError("이메일 형식과 8자 이상의 비밀번호를 확인해 주세요.");
+      } else if (err instanceof ApiError && err.code === "rate_limited") {
+        setError("시도가 너무 많아요. 잠시 후 다시 시도해 주세요.");
       } else {
         setError(err instanceof ApiError ? err.message : "문제가 발생했어요.");
       }

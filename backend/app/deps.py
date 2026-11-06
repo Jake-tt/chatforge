@@ -1,3 +1,4 @@
+import ipaddress
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -11,6 +12,11 @@ from app.errors import ApiError
 from app.models import Guest, User
 from app.security import InvalidToken, PrincipalKind, decode_token
 from app.services.claim import guest_subject, user_subject
+
+
+def require_member(principal: "Principal") -> None:
+    if principal.kind != "user":
+        raise ApiError(403, "members_only", "Only signed-up accounts can do this")
 
 
 @dataclass(frozen=True)
@@ -27,6 +33,30 @@ class Principal:
 
 def get_ctx(request: Request) -> AppContext:
     return request.app.state.ctx
+
+
+def client_ip(request: Request, trusted_proxy_hops: int) -> str:
+    """The client address to rate-limit by: the one the outermost trusted proxy saw.
+
+    Each proxy appends to X-Forwarded-For, so the client controls everything left of the
+    entries our proxies added. IPv6 is grouped by /64, the block one subscriber usually
+    gets, so rotating addresses inside it doesn't open new buckets."""
+    peer = request.client.host if request.client else "unknown"
+    address = peer
+    if trusted_proxy_hops:
+        hops = [h.strip() for v in request.headers.getlist("x-forwarded-for")
+                for h in v.split(",")]
+        hops = [h for h in hops if h]
+        # Fewer entries than proxies: the request didn't take the expected path.
+        if len(hops) >= trusted_proxy_hops:
+            address = hops[-trusted_proxy_hops]
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return peer
+    if ip.version == 6:
+        return str(ipaddress.ip_network(f"{ip}/64", strict=False))
+    return str(ip)
 
 
 async def get_session(ctx: AppContext = Depends(get_ctx)) -> AsyncIterator[AsyncSession]:
@@ -51,8 +81,11 @@ async def get_principal(
 
     if claims.kind == "user":
         user = await session.get(User, claims.subject_id)
-        if user is None:
+        if user is None or user.deleted_at is not None:
             raise ApiError(401, "invalid_token", "User no longer exists")
+        # Checked on every request, so a revocation applies at once, not at expiry.
+        if claims.version != user.token_version:
+            raise ApiError(401, "token_revoked", "This session was signed out")
         return Principal("user", user.id, user.plan, user.email)
 
     guest = await session.get(Guest, claims.subject_id)

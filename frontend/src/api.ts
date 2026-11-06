@@ -20,11 +20,14 @@ export interface Citation {
   title: string;
   url: string;
   snippet: string;
+  cited?: boolean; // whether the answer cites it; absent until the answer is checked
 }
 export interface Message {
   id: string;
   role: "user" | "assistant";
+  kind: "answer" | "clarify";
   content: string;
+  options: string[] | null; // offered with a clarifying question; [] asks for free text
   input_tokens: number;
   output_tokens: number;
   citations: Citation[] | null;
@@ -46,12 +49,14 @@ export interface StreamDone {
   input_tokens: number;
   output_tokens: number;
   stop_reason: string | null;
+  cited?: number[]; // source numbers the answer cites
 }
 
 export interface StreamHandlers {
   onDelta: (text: string) => void;
   onSources?: (citations: Citation[]) => void;
   onSuggestions?: (questions: string[]) => void;
+  onClarify?: (options: string[]) => void;
 }
 
 export class ApiError extends Error {
@@ -157,7 +162,20 @@ export const api = {
     return result;
   },
 
-  logout() {
+  /** Delete the account (password re-checked). The server purges its data in the background. */
+  async deleteAccount(password: string) {
+    await authedFetch("/auth/me", { method: "DELETE", body: JSON.stringify({ password }) }, false);
+    storeToken(null);
+  },
+
+  /** Sign out here; with `everywhere`, revoke this account's tokens on every device. */
+  async logout(everywhere = false) {
+    try {
+      if (everywhere) await authedFetch("/auth/logout-all", { method: "POST" }, false);
+    } catch (err) {
+      // Already signed out (revoked elsewhere, or expired): the goal is met.
+      if (!(err instanceof ApiError && err.status === 401)) throw err;
+    }
     storeToken(null);
   },
 
@@ -184,6 +202,8 @@ export const api = {
           handlers.onSources?.((data as { citations: Citation[] }).citations);
         } else if (event === "suggestions") {
           handlers.onSuggestions?.((data as { questions: string[] }).questions);
+        } else if (event === "clarify") {
+          handlers.onClarify?.((data as { options: string[] }).options);
         }
         else if (event === "done") return data as StreamDone;
         else if (event === "error") {

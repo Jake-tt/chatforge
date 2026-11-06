@@ -11,9 +11,11 @@ Billing reads LangChain's standard `usage_metadata` and maps it onto `Usage`, wh
 `Usage.billed()` weights apply whichever provider answered.
 """
 
+import logging
 from collections.abc import AsyncIterator, Iterator
 from typing import Any, Literal
 
+import httpx
 from langchain_anthropic import ChatAnthropic
 from langchain_core.callbacks import (
     AsyncCallbackManagerForLLMRun,
@@ -26,6 +28,7 @@ from langchain_core.messages import (
     BaseMessage,
     HumanMessage,
     SystemMessage,
+    ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_ollama import ChatOllama
@@ -40,6 +43,8 @@ from app.services.llm import (
     TextResult,
     Usage,
 )
+
+log = logging.getLogger(__name__)
 
 Purpose = Literal["main", "aux"]  # main: the answering agent; aux: router, summaries
 
@@ -67,6 +72,27 @@ def usage_from_message(message: BaseMessage) -> Usage:
     )
 
 
+async def warm_up_ollama(settings: Settings, *,
+                         transport: httpx.AsyncBaseTransport | None = None) -> None:
+    """Load the model before the first message, so the router isn't the call that waits.
+
+    The options must match the chat model's: with another num_ctx Ollama loads the model
+    again on the first real request. Failing here only means that request waits.
+    """
+    try:
+        async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=120.0,
+                                     transport=transport) as client:
+            r = await client.post("/api/generate", json={
+                "model": settings.ollama_model, "keep_alive": settings.ollama_keep_alive,
+                "options": {"num_ctx": settings.ollama_num_ctx},
+            })
+            r.raise_for_status()
+        log.info("ollama model loaded", extra={"model": settings.ollama_model})
+    except Exception:
+        log.warning("ollama warm-up failed; the first request will load the model",
+                    exc_info=True)
+
+
 def build_chat_model(settings: Settings, *, purpose: Purpose) -> BaseChatModel:
     if settings.llm_provider == "ollama":
         return ChatOllama(
@@ -77,6 +103,7 @@ def build_chat_model(settings: Settings, *, purpose: Purpose) -> BaseChatModel:
             # the answer text. The agent needs plain answers and fast routing.
             reasoning=False,
             temperature=0,
+            keep_alive=settings.ollama_keep_alive,
         )
     if settings.llm_provider == "anthropic":
         main = purpose == "main"
@@ -174,6 +201,30 @@ def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
             messages.append(HumanMessage(body(text, breakpoint)))
         else:
             messages.append(AIMessage(body(turn.content, breakpoint)))
+    return messages
+
+
+def scratch_messages(scratch: list[BaseMessage], *, cache: bool = False
+                     ) -> list[BaseMessage]:
+    """This turn's tool calls and results, to follow `to_messages`.
+
+    With `cache`, the newest tool result carries a breakpoint (the third of Anthropic's
+    four), so the next round reads every earlier result from the cache. As in
+    `to_messages`, every result is then sent as content blocks: a string result and a
+    block result serialize differently, and the next round must repeat this prefix
+    byte for byte."""
+    if not cache:
+        return list(scratch)
+    results = [i for i, m in enumerate(scratch) if isinstance(m, ToolMessage)]
+    newest = results[-1] if results else None
+    messages: list[BaseMessage] = []
+    for i, message in enumerate(scratch):
+        if isinstance(message, ToolMessage):
+            block = {"type": "text", "text": message.text}
+            if i == newest:
+                block["cache_control"] = _CACHE
+            message = message.model_copy(update={"content": [block]})
+        messages.append(message)
     return messages
 
 

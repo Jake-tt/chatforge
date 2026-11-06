@@ -9,13 +9,13 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import ColumnElement, and_, select, update
+from sqlalchemy import ColumnElement, and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.agent.graph import AgentContext
 from app.agent.stream import AgentStream
-from app.agent.tools import build_tools
+from app.agent.tools import WebSearch, build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
@@ -32,8 +32,9 @@ from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
-from app.services.rag import PastSearch, account_snapshot
+from app.services.rag import PastSearch, account_snapshot, check_citations
 from app.services.search import SearchHit
+from app.services.turn_gate import Lease
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ async def send_message(
 ) -> StreamingResponse:
     """Store the user message, then stream the assistant reply as Server-Sent Events.
 
-    Events: `delta` {text} … then `done` {message_id, input_tokens, output_tokens,
+    Events: `delta` {text} … then `done` {message_id, input_tokens, output_tokens, cited,
     cache_read_tokens, cache_write_tokens, billed_tokens, stop_reason} or `error`
     {code, message, retryable}. `billed_tokens` is what the daily quota was charged.
     Quota/rate-limit failures are returned as plain HTTP 429 *before* the stream starts.
@@ -149,6 +150,18 @@ async def send_message(
     if quota.exceeded:
         raise ApiError(429, "quota_exceeded", "Daily token limit reached")
 
+    lease = await ctx.turns.acquire(principal.subject, conversation.id)
+    try:
+        return await _start_turn(ctx, principal, conversation, body, quota, session, lease)
+    except BaseException:
+        await ctx.turns.release(lease)  # the stream never started, so it can't release
+        raise
+
+
+async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conversation,
+                      body: MessageCreate, quota, session: AsyncSession,
+                      lease: Lease) -> StreamingResponse:
+    settings = ctx.settings
     seq = await _allocate_seq(session, conversation.id)
     session.add(Message(conversation_id=conversation.id, seq=seq, role="user",
                         content=body.content))
@@ -159,6 +172,7 @@ async def send_message(
     recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
     boundary = summary.summarized_through(settings, conversation)
     turns = _to_turns([e for e in recent if e.seq > boundary])
+    after_clarify = _follows_clarify(recent, seq)
     is_first_message = seq == 1 and conversation.title is None
     system = summary.system_prompt(settings, conversation)
     # The quota just checked is the user's current usage; no need to read it again.
@@ -167,12 +181,24 @@ async def send_message(
     past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
         else None
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
-                   is_first_message, account, past)
-    return StreamingResponse(
-        _stream_agent_reply(job),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+                   is_first_message, account, past, user_seq=seq, lease=lease,
+                   after_clarify=after_clarify)
+    return TurnResponse(job, TurnProgress())
+
+
+async def _undo_user_turn(session: AsyncSession, conversation_id: uuid.UUID, seq: int) -> None:
+    """Remove the turn's user message and give its seq back.
+
+    The count only moves back if it still ends at this message: the turn holds the
+    conversation's lock, so nothing should have come after it, and if something did
+    (the lock failed open) the seq is left as is rather than reused.
+    """
+    await session.execute(delete(Message).where(Message.conversation_id == conversation_id,
+                                                 Message.seq == seq))
+    await session.execute(update(Conversation)
+                          .where(Conversation.id == conversation_id,
+                                 Conversation.message_count == seq)
+                          .values(message_count=seq - 1))
 
 
 async def _allocate_seq(session: AsyncSession, conversation_id: uuid.UUID, **values) -> int:
@@ -187,6 +213,12 @@ async def _allocate_seq(session: AsyncSession, conversation_id: uuid.UUID, **val
         .values(message_count=Conversation.message_count + 1, **values)
         .returning(Conversation.message_count)
     )
+
+
+def _follows_clarify(recent: list[HistoryEntry], user_seq: int) -> bool:
+    """Whether the message just before this turn's user message was a clarifying question."""
+    return any(e.seq == user_seq - 1 and e.role == "assistant" and e.kind == "clarify"
+               for e in recent)
 
 
 def _to_turns(entries: list[HistoryEntry]) -> list[ChatTurn]:
@@ -207,6 +239,20 @@ def _past_search(ctx: AppContext, principal: Principal,
                 conversations=ctx.settings.past_search_conversations,
                 limit=ctx.settings.past_search_top_k,
             )
+    return search
+
+
+def _web_search(ctx: AppContext, principal: Principal) -> WebSearch | None:
+    provider = ctx.web_search
+    if provider is None:
+        return None
+
+    async def search(query: str) -> list[SearchHit] | None:
+        limit = ctx.settings.daily_web_searches(principal.plan)
+        if not await ctx.quota.take_daily(f"web:{principal.subject}", limit):
+            return None
+        async with asyncio.timeout(ctx.settings.web_search_timeout_seconds):
+            return await provider.search(query, ctx.settings.web_search_top_k)
     return search
 
 
@@ -231,6 +277,61 @@ class ReplyJob:
     is_first_message: bool
     account: SearchHit | None
     past: PastSearch | None
+    user_seq: int = 0  # the user message this turn answers; undone if nothing is shown
+    lease: Lease | None = None  # admission held for the turn, released when it ends
+    after_clarify: bool = False  # the previous assistant turn asked the user back
+
+
+# Writes that must outlive a cancelled request. `asyncio.shield` keeps no strong reference
+# to the task it shields, so a reference is held here until the write finishes.
+_UNFINISHED_WRITES: set[asyncio.Task] = set()
+
+
+async def _survive_cancellation(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _UNFINISHED_WRITES.add(task)
+    task.add_done_callback(_UNFINISHED_WRITES.discard)
+    await asyncio.shield(task)
+
+
+async def drain_unfinished_writes() -> None:
+    """Let in-flight saves finish before shutdown closes the database and Redis."""
+    if _UNFINISHED_WRITES:
+        await asyncio.wait(set(_UNFINISHED_WRITES))
+
+
+@dataclass
+class TurnProgress:
+    started: bool = False  # the reply generator ran, so its own cleanup will run
+
+
+class TurnResponse(StreamingResponse):
+    """A streamed reply that cleans up even if its body never starts.
+
+    Starlette sends the headers before it runs the body generator. If sending them fails,
+    or the client is gone first, the generator never starts, and a generator that never
+    started skips its `finally` when closed: the admission lease would stay held and the
+    stored user message would be left without a reply.
+    """
+
+    def __init__(self, job: ReplyJob, progress: TurnProgress):
+        super().__init__(_stream_agent_reply(job, progress), media_type="text/event-stream",
+                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+        self._job = job
+        self._progress = progress
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self._progress.started:
+                await _survive_cancellation(_abandon(self._job))
+
+
+async def _abandon(job: ReplyJob) -> None:
+    await _persist_reply(job, "", Usage(), None)  # nothing was shown: undo the turn
+    if job.lease is not None:
+        await job.ctx.turns.release(job.lease)
 
 
 def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Usage) -> Usage:
@@ -240,12 +341,28 @@ def _estimated_usage(job: ReplyJob, turns: list[ChatTurn], partial: str, aux: Us
     return aux + Usage(_estimate_tokens(prompt), _estimate_tokens(partial))
 
 
-async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
+async def _stream_agent_reply(job: ReplyJob,
+                             progress: TurnProgress | None = None) -> AsyncIterator[str]:
     """Answer one turn with the LangGraph agent, as SSE.
 
     `AgentStream` folds the graph's `messages` (tokens) and `updates` (state deltas) into
     events; this function only drives the graph, handles failure, and finishes the reply.
     """
+    if progress is not None:
+        progress.started = True
+    try:
+        # aclosing: when the client goes away, closing this generator must close the inner
+        # one now, so its cancellation handler stores the partial reply before the lease
+        # is released (left to the garbage collector, it would run later, out of order).
+        async with aclosing(_run_agent(job)) as events:
+            async for event in events:
+                yield event
+    finally:
+        if job.lease is not None:
+            await _survive_cancellation(job.ctx.turns.release(job.lease))
+
+
+async def _run_agent(job: ReplyJob) -> AsyncIterator[str]:
     ctx = job.ctx
     stream = AgentStream(turns=job.turns)
     try:
@@ -256,7 +373,7 @@ async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
         deadline = asyncio.get_running_loop().time() + ctx.settings.agent_turn_timeout_seconds
         async with aclosing(ctx.agent.astream(
             {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
-             "usage": Usage()},
+             "usage": Usage(), "after_clarify": job.after_clarify},
             context=_agent_context(job), stream_mode=["messages", "updates"],
         )) as graph_events:
             while True:
@@ -273,21 +390,23 @@ async def _stream_agent_reply(job: ReplyJob) -> AsyncIterator[str]:
                 for name, data in events:
                     yield _sse(name, data)
     except (asyncio.CancelledError, GeneratorExit):
-        partial = stream.partial
-        await asyncio.shield(_persist_reply(
-            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+        # Store what the client saw; bill everything the model wrote.
+        await _survive_cancellation(_persist_reply(
+            job, stream.partial,
+            _estimated_usage(job, stream.turns, stream.generated, stream.usage),
             stream.citations or None))
         raise
     except Exception as exc:
-        partial = stream.partial
         yield await _fail_reply(
-            job, partial, _estimated_usage(job, stream.turns, partial, stream.usage),
+            job, stream.partial,
+            _estimated_usage(job, stream.turns, stream.generated, stream.usage),
             stream.citations or None, _as_llm_error(exc))
         return
 
     async for event in _finish_reply(
         job, stream.turns, stream.text, stream.usage, stream.citations or None,
         stream.stop_reason, followups=not stream.clarified, summarize=not stream.clarified,
+        options=stream.options if stream.clarified else None,
     ):
         yield event
 
@@ -296,7 +415,7 @@ def _agent_context(job: ReplyJob) -> AgentContext:
     ctx, s = job.ctx, job.ctx.settings
     return AgentContext(
         model=ctx.chat_model, rag=ctx.rag,
-        tools=build_tools(s, ctx.rag, job.account, job.past),
+        tools=build_tools(s, ctx.rag, job.account, job.past, _web_search(ctx, job.principal)),
         system=job.system, account=job.account, past=job.past,
         max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
         timeout_seconds=s.agent_timeout_seconds,
@@ -328,19 +447,24 @@ def _wants_followups(ctx: AppContext, answer: str, stop_reason: str | None,
 async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
                         citations: list[dict] | None, stop_reason: str | None, *,
                         followups: bool = True, summarize: bool = True,
+                        options: list[str] | None = None,
                         ) -> AsyncIterator[str]:
-    """Suggestions, storage and billing, background tasks, then `done`.
+    """Suggestions or clarify options, storage and billing, background tasks, then `done`.
 
-    A clarifying turn passes `followups=False, summarize=False`: suggestions would answer
-    for the user, and summarizing would fold the open question away.
+    A clarifying turn passes `followups=False, summarize=False` and its `options`:
+    suggestions would answer for the user, and summarizing would fold the open question
+    away. Its options take the place of suggestions.
     """
     ctx = job.ctx
+    if options is not None:
+        yield _sse("clarify", {"options": options})
     if _wants_followups(ctx, answer, stop_reason, followups):
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
         usage += suggestion_usage
         if questions:
             yield _sse("suggestions", {"questions": questions})
-    message_id = await _persist_reply(job, answer, usage, citations)
+    message = await _persist_reply(job, answer, usage, citations, options=options)
+    message_id = message.id if message else None
     if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
             "conversation_id": str(job.conversation_id), "first_message": job.first_message,
@@ -355,6 +479,14 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
             # Only an optimisation; the next turn enqueues it again. The reply is stored
             # and charged, so the client must still get `done`.
             log.warning("could not enqueue conversation summary", exc_info=True)
+    if summarize and message is not None and summary.wants_idle_compaction(ctx.settings):
+        try:
+            await ctx.tasks.enqueue(
+                summary.IDLE_TASK_NAME,
+                {"conversation_id": str(job.conversation_id), "after_seq": message.seq},
+                delay_seconds=ctx.settings.idle_compaction_seconds)
+        except Exception:
+            log.warning("could not schedule idle compaction", exc_info=True)
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,
@@ -363,7 +495,21 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
         "cache_write_tokens": usage.cache_write_tokens,
         "billed_tokens": usage.billed(ctx.settings.token_weights()),
         "stop_reason": stop_reason,
+        "cited": [c["n"] for c in (message.citations if message else None) or []
+                  if c["cited"]],
     })
+
+
+def _checked_citations(job: ReplyJob, text: str, citations: list[dict] | None
+                       ) -> list[dict] | None:
+    if not citations and "[" not in text:
+        return citations
+    checked, missing = check_citations(text, citations or [])
+    if missing:
+        log.warning("answer cites missing sources", extra={
+            "missing": missing, "sources": len(checked),
+            "conversation_id": str(job.conversation_id)})
+    return checked or None
 
 
 async def _persist_reply(
@@ -371,32 +517,50 @@ async def _persist_reply(
     text: str,
     usage: Usage,
     citations: list[dict] | None,
-) -> uuid.UUID | None:
+    *,
+    options: list[str] | None = None,
+) -> Message | None:
     """Store the assistant message and charge its tokens in one transaction.
 
-    With no text (failed or cancelled before the first token) only the tokens already
-    spent on routing/search are charged, and no empty message is stored.
+    Its citations are stored checked against the text (`check_citations`).
+
+    With no text (the turn failed or was cancelled before anything reached the client)
+    the user message is undone, so the conversation is as before the turn: the same
+    question can be asked again, and still counts as the first message. Tokens already
+    spent are charged either way.
     """
     ctx, principal, conversation_id = job.ctx, job.principal, job.conversation_id
     billed = usage.billed(ctx.settings.token_weights())
-    if not text and not billed:
+    undo = not text and job.user_seq > 0
+    if not (text or billed or undo):
         return None
     # A fresh session: the request-scoped one is closed once streaming starts.
     async with ctx.sessionmaker() as session:
+        if undo:
+            await _undo_user_turn(session, conversation_id, job.user_seq)
         message = None
         if text:
             seq = await _allocate_seq(session, conversation_id, updated_at=datetime.now(UTC))
+            if seq is None:
+                # The account was deleted and purged while this reply streamed: nothing
+                # to store it in, and no one left to charge. Leaving now rolls back.
+                log.info("dropping a reply to a purged conversation",
+                         extra={"conversation_id": str(conversation_id)})
+                return None
             message = Message(
                 conversation_id=conversation_id, seq=seq, role="assistant", content=text,
+                kind="answer" if options is None else "clarify", options=options,
                 input_tokens=usage.prompt_tokens, output_tokens=usage.output_tokens,
-                citations=citations,
+                citations=_checked_citations(job, text, citations),
             )
             session.add(message)
         await ctx.quota.add_usage(session, principal.subject, billed)
         await session.commit()
     await ctx.quota.invalidate(principal.subject)
     if message is None:
+        if undo:
+            await ctx.history.invalidate(principal.subject, conversation_id)
         return None
     await ctx.history.append(principal.subject, conversation_id,
-                             HistoryEntry(message.seq, "assistant", text))
-    return message.id
+                             HistoryEntry(message.seq, "assistant", text, message.kind))
+    return message

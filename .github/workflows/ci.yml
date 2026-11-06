@@ -6,8 +6,33 @@ on:
   pull_request:
 
 jobs:
+  # backend/frontend are required checks, so they must report on every PR.
+  # A job skipped by `if` counts as passing; a workflow skipped by `paths` never reports.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  # Always runs: check --strict-paths also validates doc_refs (plan/, decision-docs/).
   decisions:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,7 +45,12 @@ jobs:
         run: python scripts/decisions.py check --strict-paths --strict-names
 
   backend:
+    needs: changes
+    # Runs when the filter could not decide (changes failed), so a broken filter never passes as skipped.
+    if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
+    # The default is 6 hours: a hung test would hold the runner (and the PR) that long.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -53,11 +83,17 @@ jobs:
           alembic upgrade head
       - name: Tests (Postgres)
         run: pytest -q
+        # faulthandler_timeout (pyproject) dumps every thread's stack first, so the log
+        # shows where a hung test is stuck.
+        timeout-minutes: 10
         env:
           TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
 
   frontend:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.frontend != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend

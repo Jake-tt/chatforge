@@ -8,8 +8,10 @@
   account, their earlier conversations) or that the request is too ambiguous to act on.
   It records the resulting source plan once, so routing and fetching can't disagree.
 - master_router: conditional edge on that plan.
-- clarify: the router's clarifying question *is* the reply; no agent call, and the turn
-  is excluded from summarization (folding it away would orphan the user's answer).
+- clarify: the router's clarifying question *is* the reply, with likely answers offered
+  as options; no agent call, and the turn is excluded from summarization (folding it
+  away would orphan the user's answer). Only one in a row: right after a clarifying
+  turn, the agent answers on a stated assumption instead of asking again.
 - coordinator: fetches everything in the plan concurrently and attaches it to the
   current turn as numbered sources.
 - agent: a ReAct loop over tools for anything the prefetch didn't cover. If the router
@@ -35,37 +37,55 @@ from langgraph.runtime import Runtime
 from pydantic import Field, field_validator
 
 from app.agent.tools import Tool, ToolOutput
-from app.services.chat_models import stop_reason_of, to_messages, usage_from_message
+from app.services.chat_models import (
+    scratch_messages,
+    stop_reason_of,
+    to_messages,
+    usage_from_message,
+)
 from app.services.llm import ChatTurn, Usage
 from app.services.rag import ROUTER_SYSTEM, PastSearch, RagPipeline, RouteDecision
 from app.services.search import SearchHit
+from app.services.suggestions import clean_chips
 
 log = logging.getLogger(__name__)
 
 CLARIFY_MAX_CHARS = 200
+CLARIFY_MAX_OPTIONS = 4
+CLARIFY_OPTION_CHARS = 40
 
 AGENT_ROUTER_SYSTEM = ROUTER_SYSTEM + (
     " Set `needs_clarification` only when the latest message cannot be answered or searched "
     "without asking what the user means, for example a bare pronoun with nothing in the "
-    "conversation it could refer to; then write one short clarifying question in the "
-    "user's language in `clarifying_question`."
+    "conversation it could refer to, or when the right answer depends on something only "
+    "the user knows; then write one short clarifying question in the user's language in "
+    f"`clarifying_question`, and up to {CLARIFY_MAX_OPTIONS} likely answers to it in "
+    "`clarifying_options` as short phrases the user could tap, not questions. Leave "
+    "`clarifying_options` empty when the answer is open-ended."
 )
 
 TOOLS_NOTE = """
 
-You can call tools to look up the help center, this user's account, and their earlier \
-conversations. Call one only when the sources you already have don't answer the question. \
+You can call tools to look up the help center, this user's account, their earlier \
+conversations and, when offered, the web. Call one only when the sources you already have \
+don't answer the question. \
 Do not write any text in a message that calls tools. Cite sources inline by number, like [1]."""
 
 # Sent with the current turn, not the system prompt, so the cached prefix stays the same.
 ROUTE_FAILED_NOTE = "(This request could not be routed automatically. Decide yourself " \
     "whether a tool is needed.)"
+ASSUME_NOTE = "(You already asked the user a clarifying question last turn. Do not ask " \
+    "another: say in one sentence what you assume they mean, answer on that assumption, " \
+    "and invite them to correct you.)"
 
 
 class AgentRoute(RouteDecision):
     needs_clarification: bool = Field(
         default=False, description="True if the request is too ambiguous to act on.")
     clarifying_question: str = Field(default="", description="One short question.")
+    clarifying_options: list[str] = Field(
+        default_factory=list,
+        description="Likely answers to the clarifying question, or empty for free text.")
 
     @field_validator("clarifying_question")
     @classmethod
@@ -74,6 +94,12 @@ class AgentRoute(RouteDecision):
         # still a question, so trim it rather than failing the whole route.
         return value.strip()[:CLARIFY_MAX_CHARS]
 
+    @field_validator("clarifying_options", mode="before")
+    @classmethod
+    def _clean_options(cls, value: object) -> list[str]:
+        # Shown as tappable chips: the same cleaning as suggested follow-ups.
+        return clean_chips(value, limit=CLARIFY_MAX_OPTIONS, max_chars=CLARIFY_OPTION_CHARS)
+
     @classmethod
     def fake(cls, prompt: str) -> "AgentRoute":
         base = RouteDecision.fake(prompt)
@@ -81,7 +107,8 @@ class AgentRoute(RouteDecision):
         vague = latest.startswith(("그거", "이거")) and len(latest) < 15
         return cls(**base.model_dump(), needs_clarification=vague,
                    clarifying_question="어떤 것을 말씀하시는지 조금 더 알려주시겠어요?"
-                   if vague else "")
+                   if vague else "",
+                   clarifying_options=["요금제", "사용 한도", "계정"] if vague else [])
 
 
 @dataclass(frozen=True)
@@ -125,6 +152,8 @@ class AgentState(TypedDict, total=False):
     answer: str
     stop_reason: str
     clarified: bool
+    options: list[str]  # offered with a clarifying question
+    after_clarify: bool  # input: the previous assistant turn was a clarifying question
 
 
 def plan_sources(route: AgentRoute, turns: list[ChatTurn], ctx: AgentContext) -> SourcePlan:
@@ -144,6 +173,7 @@ async def router(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     log.info("agent route", extra={
         "routed": route is not None,
         "clarify": bool(route and route.needs_clarification),
+        "after_clarify": state.get("after_clarify", False),
         "plan": dataclasses.asdict(plan) if plan else None,
         "router_ms": round((time.perf_counter() - started) * 1000),
     })
@@ -154,14 +184,19 @@ def master_router(state: AgentState) -> Literal["clarify", "coordinator", "agent
     route, plan = state.get("route"), state.get("plan")
     if route is None:
         return "agent"  # router failed: the agent picks tools itself
-    if route.needs_clarification and route.clarifying_question:
+    if _asks_back(route) and not state.get("after_clarify"):
         return "clarify"
     return "coordinator" if plan is not None and plan.any else "agent"
 
 
+def _asks_back(route: AgentRoute) -> bool:
+    return route.needs_clarification and bool(route.clarifying_question)
+
+
 async def clarify(state: AgentState) -> dict:
-    return {"answer": state["route"].clarifying_question, "clarified": True,
-            "stop_reason": "end_turn"}
+    route = state["route"]
+    return {"answer": route.clarifying_question, "options": route.clarifying_options,
+            "clarified": True, "stop_reason": "end_turn"}
 
 
 async def coordinator(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
@@ -179,18 +214,26 @@ async def coordinator(state: AgentState, runtime: Runtime[AgentContext]) -> dict
 
 
 def _agent_turns(state: AgentState) -> list[ChatTurn]:
-    turns = state["turns"]
-    if state.get("route") is not None:
+    turns, route = state["turns"], state.get("route")
+    if route is None:
+        note = ROUTE_FAILED_NOTE
+    elif _asks_back(route) and state.get("after_clarify"):
+        note = ASSUME_NOTE
+    else:
         return turns
     current = turns[-1]
-    note = f"{current.context}\n\n{ROUTE_FAILED_NOTE}" if current.context else ROUTE_FAILED_NOTE
+    note = f"{current.context}\n\n{note}" if current.context else note
     return [*turns[:-1], dataclasses.replace(current, context=note)]
 
 
 async def agent(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     ctx = runtime.context
+    # The answering round keeps the breakpoint too: a cache is read only at a breakpoint
+    # (or a few blocks before one), so without it this round would resend every earlier
+    # tool result uncached to save a write premium on the newest one.
     messages = to_messages(ctx.system + TOOLS_NOTE, _agent_turns(state),
-                           cache=ctx.prompt_cache) + state.get("scratch", [])
+                           cache=ctx.prompt_cache) + \
+        scratch_messages(state.get("scratch", []), cache=ctx.prompt_cache)
     can_use_tools = bool(ctx.tools) and state.get("tool_rounds", 0) < ctx.max_tool_rounds
     model = ctx.model.bind_tools([t.as_openai() for t in ctx.tools]) if can_use_tools \
         else ctx.model

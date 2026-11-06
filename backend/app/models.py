@@ -37,6 +37,10 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
+    # Every token carries the version it was issued at; bumping it revokes them all.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Set when the account is deleted; its data is purged by a background task.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Guest(Base):
@@ -103,7 +107,12 @@ class Message(Base):
     # lets caches detect a missing message: cached seqs must be contiguous.
     seq: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    # What an assistant message is: "answer", or "clarify" (a question back to the user).
+    # Kept apart from `role`, which is what the model API sees.
+    kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer")
     content: Mapped[str] = mapped_column(Text)
+    # Answers offered with a clarifying question; [] means a free-text answer is expected.
+    options: Mapped[list[str] | None] = mapped_column(JSON)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Sources the answer was grounded on: [{n, title, url, snippet}], assistant only.
@@ -123,3 +132,26 @@ class UsageDaily(Base):
     subject: Mapped[str] = mapped_column(String(64), primary_key=True)  # "user:<id>" | "guest:<id>"
     day: Mapped[date] = mapped_column(Date, primary_key=True)
     tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+
+
+class PaymentEvent(Base):
+    """Every payment webhook event received, keyed by the provider's event id.
+
+    The primary key makes delivery idempotent: a redelivered event conflicts and is not
+    applied twice. `occurred_at` orders a user's events, so one that arrives late can't
+    undo a newer change. There is deliberately no foreign key to users: the record of a
+    payment outlives the account it changed.
+    """
+
+    __tablename__ = "payment_events"
+    __table_args__ = (Index("ix_payment_events_user_id_occurred_at", "user_id", "occurred_at"),)
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    type: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    # "applied" | "stale" | "ignored" | "unknown_user"
+    outcome: Mapped[str] = mapped_column(String(16))

@@ -1,17 +1,71 @@
+import hashlib
+import hmac
+import logging
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Depends, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.context import AppContext
-from app.deps import Principal, get_ctx, get_principal, get_session
+from app.deps import (
+    Principal,
+    client_ip,
+    get_ctx,
+    get_principal,
+    get_session,
+    require_member,
+)
 from app.errors import ApiError
 from app.models import Guest, User
-from app.schemas import AuthOut, ClaimOut, Credentials, GuestTokenOut, MeOut, UserOut
+from app.schemas import (
+    AuthOut,
+    ClaimOut,
+    Credentials,
+    GuestTokenOut,
+    MeOut,
+    PasswordConfirm,
+    UserOut,
+)
 from app.security import InvalidToken, create_token, decode_token, hash_password, verify_password
+from app.services import account
 from app.services.claim import ClaimResult, claim_guest, guest_subject, user_subject
 
+log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+HOUR = 3600
+LOGIN_WINDOW_SECONDS = 15 * 60
+
+
+def _too_many(ctx: AppContext, message: str, window_seconds: int) -> ApiError:
+    retry_after = ctx.quota.window_remaining(window_seconds)
+    return ApiError(429, "rate_limited", message, headers={"Retry-After": str(retry_after)})
+
+
+async def _check_password(ctx: AppContext, email: str, password: str, user: User | None,
+                          message: str) -> None:
+    """Verify a password under the per-account failure limit, shared by every endpoint
+    that takes one, so no endpoint adds guesses on top of another's.
+
+    The counter takes every attempt and is cleared on success, so it measures consecutive
+    failures. Checked before hashing, so it also caps the CPU an attacker can burn."""
+    bucket = _email_bucket(ctx, email)
+    if await ctx.quota.hit_rate_limit(bucket, ctx.settings.login_failures_per_15min_per_email,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many failed attempts for this account",
+                        LOGIN_WINDOW_SECONDS)
+    if not verify_password(password, user.password_hash if user else None):
+        raise ApiError(401, "invalid_credentials", message)
+    await ctx.quota.reset_rate_limit(bucket, LOGIN_WINDOW_SECONDS)
+
+
+def _email_bucket(ctx: AppContext, email: str) -> str:
+    # Keyed by a keyed digest: a plain hash of an email is reversible with a list of emails.
+    secret = ctx.settings.jwt_secret.get_secret_value().encode()
+    return "login-fail:" + hmac.new(secret, email.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 @router.post("/guest", response_model=GuestTokenOut, status_code=201)
@@ -22,10 +76,10 @@ async def create_guest(
 ) -> GuestTokenOut:
     # Guests are free to create, so cap creations per IP; otherwise a script could mint
     # unlimited guests and with them unlimited daily quota.
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request, ctx.settings.trusted_proxy_hops)
     limit = ctx.settings.guest_creations_per_hour_per_ip
-    if await ctx.quota.hit_rate_limit(f"guest-create:{ip}", limit, 3600):
-        raise ApiError(429, "rate_limited", "Too many guest sessions from this address")
+    if await ctx.quota.hit_rate_limit(f"guest-create:{ip}", limit, HOUR):
+        raise _too_many(ctx, "Too many guest sessions from this address", HOUR)
 
     guest = Guest()
     session.add(guest)
@@ -40,9 +94,14 @@ async def create_guest(
 @router.post("/signup", response_model=AuthOut, status_code=201)
 async def signup(
     body: Credentials,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> AuthOut:
+    ip = client_ip(request, ctx.settings.trusted_proxy_hops)
+    if await ctx.quota.hit_rate_limit(f"signup:{ip}", ctx.settings.signups_per_hour_per_ip,
+                                      HOUR):
+        raise _too_many(ctx, "Too many signups from this address", HOUR)
     user = User(email=body.email.lower(), password_hash=hash_password(body.password))
     session.add(user)
     try:
@@ -55,13 +114,21 @@ async def signup(
 @router.post("/login", response_model=AuthOut)
 async def login(
     body: Credentials,
+    request: Request,
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> AuthOut:
+    settings = ctx.settings
+    # Checked before the password hash: both limits also cap the CPU an attacker can burn.
+    ip = client_ip(request, settings.trusted_proxy_hops)
+    if await ctx.quota.hit_rate_limit(f"login:{ip}", settings.logins_per_15min_per_ip,
+                                      LOGIN_WINDOW_SECONDS):
+        raise _too_many(ctx, "Too many login attempts from this address", LOGIN_WINDOW_SECONDS)
     # Emails are stored lowercased, so this hits the unique index.
-    user = await session.scalar(select(User).where(User.email == body.email.lower()))
-    if not verify_password(body.password, user.password_hash if user else None):
-        raise ApiError(401, "invalid_credentials", "Email or password is incorrect")
+    email = body.email.lower()
+    user = await session.scalar(select(User).where(User.email == email))
+    await _check_password(ctx, email, body.password, user,
+                          "Email or password is incorrect")
     return await _finish_auth(ctx, session, user, body.guest_token)
 
 
@@ -84,7 +151,8 @@ async def _finish_auth(
         # Cached histories are keyed by owner; the guest's keys are now unreachable.
         await ctx.history.invalidate_owner(guest_subject(claims.subject_id))
 
-    token = create_token("user", user.id, secret, ctx.settings.user_token_ttl_minutes)
+    token = create_token("user", user.id, secret, ctx.settings.user_token_ttl_minutes,
+                         version=user.token_version)
     return AuthOut(
         token=token,
         user=UserOut.model_validate(user),
@@ -99,3 +167,43 @@ async def _finish_auth(
 @router.get("/me", response_model=MeOut)
 async def me(principal: Principal = Depends(get_principal)) -> MeOut:
     return MeOut(kind=principal.kind, id=principal.id, plan=principal.plan, email=principal.email)
+
+
+@router.post("/logout-all", status_code=204)
+async def logout_all(
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Sign out every device, this one included. A stolen token stops working at once."""
+    require_member(principal)
+    # In SQL, so two concurrent calls both count; either way every older token is dead.
+    await session.execute(update(User).where(User.id == principal.id)
+                          .values(token_version=User.token_version + 1))
+    await session.commit()
+
+
+@router.delete("/me", status_code=202)
+async def delete_account(
+    body: PasswordConfirm,
+    principal: Principal = Depends(get_principal),
+    ctx: AppContext = Depends(get_ctx),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete the account: signed out everywhere and the email freed now, data purged by
+    a background task (`services.account`)."""
+    require_member(principal)
+    # A stolen token alone must not be enough, nor a way to guess the password.
+    user = await session.get(User, principal.id)
+    await _check_password(ctx, principal.email, body.password, user, "Password is incorrect")
+
+    await session.execute(update(User).where(User.id == user.id).values(
+        deleted_at=datetime.now(UTC), token_version=User.token_version + 1,
+        email=account.tombstone_email(user.id)))
+    await session.commit()
+    try:
+        await ctx.tasks.enqueue(account.TASK_NAME, {"user_id": str(user.id)})
+    except Exception:
+        # The account is already gone for the user; only the purge is late. The marked
+        # row says what's left to purge.
+        log.error("could not enqueue account purge", exc_info=True,
+                  extra={"user_id": str(user.id)})

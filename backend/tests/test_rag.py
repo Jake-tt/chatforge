@@ -3,9 +3,12 @@
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from app.agent.graph import ROUTE_FAILED_NOTE, TOOLS_NOTE
 from app.config import Settings
 from app.services.llm import FakeProvider, LLMError, TextResult, Usage
+from app.services.rag import cited_numbers
 from app.services.search import BM25Search, load_markdown_corpus, tokenize
 from tests.fakes import RecordingChatModel
 
@@ -81,7 +84,9 @@ async def test_knowledge_question_is_grounded_and_cited(make_harness):
     assert "<sources>" in llm.contexts[-1] and "[1] 요금제와 사용 한도" in llm.contexts[-1]
     # Citations are stored with the answer, and routing tokens are charged with it.
     detail = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
-    assert detail["messages"][-1]["citations"] == sources
+    stored = detail["messages"][-1]["citations"]
+    # Stored with whether the answer cited each one (this fake answer cites none).
+    assert stored == [{**c, "cited": False} for c in sources]
     done = result.last("done")
     usage = (await h.client.get("/usage", headers=headers)).json()
     assert usage["used"] == done["billed_tokens"]
@@ -188,3 +193,15 @@ async def test_search_outage_answers_without_sources(make_harness):
 
     assert result.response.status_code == 200
     assert not any(e == "sources" for e, _ in result.events)
+
+
+@pytest.mark.parametrize("text, numbers", [
+    ("규칙은 이렇습니다 [1][3].", {1, 3}),
+    ("두 문서 모두 같습니다 [1, 2].", {1, 2}),  # small local models group citations
+    ("세 문서에 나옵니다 [2-4].", {2, 3, 4}),
+    ("`arr[0]`과 x[1]은 코드이고 [2026]은 연도입니다.", set()),
+    ("```python\nrows[1] = 2\n```\n답은 [1]", {1}),
+    ("[1](https://example.com) 링크는 인용이 아닙니다.", set()),
+])
+def test_cited_numbers_reads_markers_not_code_or_links(text, numbers):
+    assert cited_numbers(text) == numbers

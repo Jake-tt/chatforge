@@ -17,6 +17,12 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://chatforge:chatforge@localhost:5432/chatforge"
     redis_url: str = "redis://localhost:6379/0"
+    # Memorystore answers in about a millisecond; anything near these limits is an outage.
+    # Connecting gets more room: a cold, CPU-throttled instance is slow to open sockets.
+    redis_connect_timeout_seconds: float = 1.0
+    redis_socket_timeout_seconds: float = 0.5
+    redis_failure_threshold: int = Field(default=3, ge=1)  # consecutive, to open the breaker
+    redis_cooldown_seconds: float = 10.0
     cors_origins: list[str] = ["http://localhost:5173"]
     log_format: Literal["text", "json"] = "text"  # "json" on Cloud Run
 
@@ -30,6 +36,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"  # native tool calling; fits a 16GB Apple Silicon machine
     ollama_num_ctx: int = 8192
+    # How long Ollama keeps the model loaded after a request (-1: until Ollama stops, or a
+    # duration like "30m"). Its 5-minute default made the router time out on reload.
+    ollama_keep_alive: int | str = -1
     anthropic_model: str = "claude-opus-5-5"
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     llm_max_tokens: int = 16000
@@ -59,14 +68,24 @@ class Settings(BaseSettings):
     summary_batch_messages: int = 40  # most messages folded per run; backlogs take several
     conversation_summary_char_limit: int = 2000
     summary_timeout_seconds: float = 30.0
+    # An hour after the last reply the prompt cache (at most 1h) has expired, so the
+    # unsummarized tail is folded down to the last turn before the user comes back.
+    idle_compaction_seconds: int = Field(default=3600, ge=0)  # 0 turns it off
+    idle_compaction_keep_turns: int = Field(default=1, ge=1)
+    idle_compaction_min_tokens: int = 1000  # estimated; a shorter tail isn't worth a call
 
     # LangGraph agent (router → coordinator / ReAct tools)
     agent_max_tool_rounds: int = Field(default=3, ge=0, le=5)  # bounds cost per turn
     agent_max_tool_calls: int = Field(default=4, ge=1, le=8)  # per round
+    # Per tool call. Every later round resends earlier results, so this bounds the context
+    # a turn can grow to: rounds × calls × budget.
+    tool_result_char_budget: int = Field(default=1500, ge=100)
     agent_timeout_seconds: float = 60.0  # per agent model call
     # Whole turn (router, lookups, every agent round). Below Cloud Run's request timeout,
     # so a slow turn ends with an `error` event instead of a cut-off stream.
     agent_turn_timeout_seconds: float = 240.0
+    # Turns streaming at once per user: bounds how far parallel turns can pass the quota
+    max_concurrent_streams: int = Field(default=2, ge=1)
 
     # Follow-up question chips under each answer
     suggestions_enabled: bool = True
@@ -77,6 +96,16 @@ class Settings(BaseSettings):
     guest_daily_tokens: int = 20_000
     free_daily_tokens: int = 200_000
     pro_daily_tokens: int = 2_000_000
+
+    # Web search (agent tool, Tavily). Each search spends a Tavily credit, so it is capped
+    # per user per day, and the cap fails closed when Redis is down.
+    web_search_enabled: bool = False
+    tavily_api_key: SecretStr | None = None  # TAVILY_API_KEY; Secret Manager in prod
+    web_search_top_k: int = 3
+    web_search_timeout_seconds: float = 8.0
+    guest_daily_web_searches: int = 3
+    free_daily_web_searches: int = 20
+    pro_daily_web_searches: int = 100
     # Quotas count input-token equivalents: each token kind is weighted by its price
     # relative to an uncached input token (defaults: claude-opus-5-5 list prices).
     token_weight_output: float = 5.0
@@ -84,8 +113,18 @@ class Settings(BaseSettings):
     token_weight_cache_write: float = 1.25  # 5-minute TTL
     requests_per_minute: int = 20
     guest_creations_per_hour_per_ip: int = 10
+    signups_per_hour_per_ip: int = 5
+    logins_per_15min_per_ip: int = 30  # password spraying across many emails
+    login_failures_per_15min_per_email: int = 5  # guessing one account's password
+    # Proxies in front of the app that append to X-Forwarded-For (Cloud Run: 1). The
+    # client IP is the entry the outermost one appended; entries left of it are forgeable.
+    trusted_proxy_hops: int = Field(default=0, ge=0)
+
+    # Payment provider webhooks; the endpoint exists only when a secret is set
+    payment_webhook_secret: SecretStr | None = None
 
     # Async jobs
+    purge_batch_conversations: int = Field(default=100, ge=1)  # per transaction
     task_backend: Literal["inline", "cloudtasks"] = "inline"
     gcp_project: str = ""
     gcp_location: str = "asia-northeast3"
@@ -95,6 +134,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
+        if self.web_search_enabled and not self.tavily_api_key:
+            raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
         if self.env == "prod":
             if self.jwt_secret.get_secret_value() == _DEV_JWT_SECRET:
                 raise ValueError("JWT_SECRET must be set in prod")
@@ -110,6 +151,9 @@ class Settings(BaseSettings):
                 host in self.ollama_base_url for host in ("localhost", "127.0.0.1")
             ):
                 raise ValueError("LLM_PROVIDER=ollama needs a reachable OLLAMA_BASE_URL in prod")
+            # Behind Cloud Run a silent 0 would put every client in one rate-limit bucket.
+            if "trusted_proxy_hops" not in self.model_fields_set:
+                raise ValueError("TRUSTED_PROXY_HOPS must be set in prod")
         return self
 
     def token_weights(self) -> TokenWeights:
@@ -121,6 +165,13 @@ class Settings(BaseSettings):
             "guest": self.guest_daily_tokens,
             "free": self.free_daily_tokens,
             "pro": self.pro_daily_tokens,
+        }[plan]
+
+    def daily_web_searches(self, plan: str) -> int:
+        return {
+            "guest": self.guest_daily_web_searches,
+            "free": self.free_daily_web_searches,
+            "pro": self.pro_daily_web_searches,
         }[plan]
 
 

@@ -9,12 +9,14 @@ import json
 
 import anthropic
 import httpx2
+from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import BaseModel
 
 from app.config import Settings
 from app.services.chat_models import (
     LangChainProvider,
     build_chat_model,
+    scratch_messages,
     to_messages,
     usage_from_message,
 )
@@ -166,3 +168,27 @@ def test_real_providers_use_json_schema_for_structured_calls():
                                            anthropic_api_key="test"))
         assert isinstance(provider, LangChainProvider)
         assert provider.structured_method == "json_schema"
+
+
+async def test_tool_rounds_resend_earlier_results_byte_for_byte():
+    wire = Wire(_message(), _message())
+    model = _claude("main", wire)
+    base = to_messages("sys", [ChatTurn("user", "q")], cache=True)
+    call_1 = AIMessage("", tool_calls=[{"name": "search_help", "args": {}, "id": "t1"}])
+    result_1 = ToolMessage("<sources>[1] a</sources>", tool_call_id="t1")
+    call_2 = AIMessage("", tool_calls=[{"name": "search_help", "args": {}, "id": "t2"}])
+    result_2 = ToolMessage("<sources>[2] b</sources>", tool_call_id="t2")
+
+    await model.ainvoke(base + scratch_messages([call_1, result_1], cache=True))
+    await model.ainvoke(base + scratch_messages([call_1, result_1, call_2, result_2],
+                                                cache=True))
+
+    first, second = wire.body(0)["messages"], wire.body(1)["messages"]
+    assert first[-1]["content"][-1]["cache_control"] == EPHEMERAL
+    assert second[-1]["content"][-1]["cache_control"] == EPHEMERAL
+
+    def unmarked(message):
+        return [{k: v for k, v in b.items() if k != "cache_control"}
+                for b in message["content"]] if isinstance(message["content"], list) \
+            else message["content"]
+    assert [unmarked(m) for m in second[:len(first)]] == [unmarked(m) for m in first]

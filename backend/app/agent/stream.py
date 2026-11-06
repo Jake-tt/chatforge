@@ -31,6 +31,7 @@ class AgentStream:
     answer: str | None = None
     stop_reason: str = "end_turn"
     clarified: bool = False
+    options: list[str] | None = None  # offered with a clarifying question
     streamed: list[str] = field(default_factory=list)  # every delta sent to the client
     _round: str | None = None  # id of the model call being streamed
     _held: list[str] = field(default_factory=list)
@@ -44,7 +45,14 @@ class AgentStream:
 
     @property
     def partial(self) -> str:
+        """What the client saw: stored as the reply if the turn stops early."""
         return "".join(self.streamed)
+
+    @property
+    def generated(self) -> str:
+        """Everything the model wrote this turn, held-back text included: billed if the
+        turn stops early, even when none of it reached the client."""
+        return "".join(self.streamed + self._held)
 
     def on_message(self, chunk: object, meta: dict) -> list[Event]:
         if meta.get("langgraph_node") != "agent" or not isinstance(chunk, AIMessageChunk):
@@ -71,6 +79,8 @@ class AgentStream:
         self.turns = update.get("turns", self.turns)
         self.stop_reason = update.get("stop_reason", self.stop_reason)
         self.clarified = self.clarified or update.get("clarified", False)
+        if "options" in update:
+            self.options = update["options"]
         if update.get("citations"):
             self.citations = [*self.citations, *update["citations"]]
             events.append(("sources", {"citations": self.citations}))

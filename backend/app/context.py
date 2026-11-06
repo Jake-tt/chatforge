@@ -13,6 +13,8 @@ from app.services.rag import RagPipeline
 from app.services.redis_guard import RedisGuard
 from app.services.suggestions import SuggestionService
 from app.services.tasks import TaskQueue
+from app.services.turn_gate import TurnGate
+from app.services.web_search import WebSearchProvider
 
 
 @dataclass
@@ -30,5 +32,7 @@ class AppContext:
     rag: RagPipeline
     suggestions: SuggestionService | None
     tasks: TaskQueue
+    turns: TurnGate  # one turn per conversation, a few per user
     chat_model: BaseChatModel  # the agent's answering model
     agent: Any  # the compiled LangGraph graph
+    web_search: WebSearchProvider | None = None  # set when WEB_SEARCH_ENABLED

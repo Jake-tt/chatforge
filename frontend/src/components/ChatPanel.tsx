@@ -1,5 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api, ApiError, Citation } from "../api";
+import { chipsFor, composerHint } from "../chips";
+import { markCited, shownSources } from "../sources";
 
 interface Bubble {
   id: string;
@@ -9,6 +11,7 @@ interface Bubble {
   note?: string;
   citations?: Citation[] | null;
   suggestions?: string[];
+  options?: string[] | null; // set on a clarifying question
 }
 
 interface Props {
@@ -23,6 +26,8 @@ const ERROR_TEXT: Record<string, string> = {
   quota_exceeded: "오늘 사용할 수 있는 토큰을 모두 썼어요. 내일 다시 시도해 주세요.",
   rate_limited: "메시지를 너무 빠르게 보내고 있어요. 잠시 후 다시 시도해 주세요.",
   llm_unavailable: "모델 응답이 중간에 끊겼어요. 다시 시도해 주세요.",
+  stream_in_progress: "이 대화에서 아직 답변을 작성하고 있어요. 끝난 뒤 다시 보내 주세요.",
+  too_many_streams: "동시에 진행 중인 답변이 너무 많아요. 잠시 후 다시 보내 주세요.",
 };
 
 export default function ChatPanel(props: Props) {
@@ -70,15 +75,20 @@ export default function ChatPanel(props: Props) {
 
     const controller = new AbortController();
     abortRef.current = controller;
+    let received = false; // any answer text arrived (state updates may not have run yet)
     try {
       const conversationId = await props.ensureConversation();
       const done = await api.sendMessage(
         conversationId,
         content,
         {
-          onDelta: (delta) => updateLast((b) => ({ ...b, content: b.content + delta })),
+          onDelta: (delta) => {
+            if (delta) received = true;
+            updateLast((b) => ({ ...b, content: b.content + delta }));
+          },
           onSources: (citations) => updateLast((b) => ({ ...b, citations })),
           onSuggestions: (suggestions) => updateLast((b) => ({ ...b, suggestions })),
+          onClarify: (options) => updateLast((b) => ({ ...b, options })),
         },
         controller.signal,
       );
@@ -86,19 +96,22 @@ export default function ChatPanel(props: Props) {
         ...b,
         pending: false,
         note: done.stop_reason === "refusal" ? "이 요청에는 답변할 수 없어요." : undefined,
+        citations: b.citations ? markCited(b.citations, done.cited) : b.citations,
       }));
     } catch (err) {
-      if (controller.signal.aborted) {
-        // Stopped by the user; the server keeps (and bills) what was generated so far.
-        updateLast((b) => ({ ...b, pending: false, note: "응답을 중지했어요." }));
-        return;
+      if (received) {
+        // Keep what streamed: the server stores (and bills) it as the reply.
+        const note = controller.signal.aborted ? "응답을 중지했어요." : undefined;
+        updateLast((b) => ({ ...b, pending: false, note }));
+      } else {
+        // Nothing arrived, so the server undid the whole turn (the user message too):
+        // do the same here and put the question back to resend.
+        setBubbles((prev) => prev.slice(0, -2));
+        // Keep anything typed meanwhile; otherwise offer the question again.
+        setInput((current) => (current.trim() ? current : content));
       }
+      if (controller.signal.aborted) return;
       const apiErr = err instanceof ApiError ? err : null;
-      // Keep whatever streamed before the failure; drop the bubble if nothing arrived.
-      setBubbles((prev) => {
-        const last = prev[prev.length - 1];
-        return last.content ? [...prev.slice(0, -1), { ...last, pending: false }] : prev.slice(0, -1);
-      });
       setError({
         code: apiErr?.code ?? "unknown",
         message: (apiErr && ERROR_TEXT[apiErr.code]) ?? apiErr?.message ?? "문제가 발생했어요.",
@@ -129,23 +142,15 @@ export default function ChatPanel(props: Props) {
             {b.note && <div className="note">{b.note}</div>}
             {b.citations && b.citations.length > 0 && (
               <ol className="sources" aria-label="참고한 자료">
-                {b.citations.map((c) => (
+                {shownSources(b.citations).map((c) => (
                   <li key={c.n} value={c.n} title={c.snippet}>
                     {c.title}
                   </li>
                 ))}
               </ol>
             )}
-            {/* Only the latest answer offers follow-ups; older ones would be stale. */}
-            {i === bubbles.length - 1 && !streaming && b.suggestions && b.suggestions.length > 0 && (
-              <div className="suggestions">
-                {b.suggestions.map((q) => (
-                  <button key={q} type="button" className="chip" onClick={() => void send(q)}>
-                    {q}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Only the latest message offers chips; older ones would be stale. */}
+            {i === bubbles.length - 1 && !streaming && <Chips bubble={b} onPick={send} />}
           </div>
         ))}
         <div ref={bottomRef} />
@@ -171,7 +176,7 @@ export default function ChatPanel(props: Props) {
       >
         <textarea
           value={input}
-          placeholder="메시지를 입력하세요 (Shift+Enter 줄바꿈)"
+          placeholder={streaming ? composerHint(undefined) : composerHint(bubbles[bubbles.length - 1])}
           rows={1}
           maxLength={8000}
           onChange={(e) => setInput(e.target.value)}
@@ -193,5 +198,24 @@ export default function ChatPanel(props: Props) {
         )}
       </form>
     </section>
+  );
+}
+
+function Chips({ bubble, onPick }: { bubble: Bubble; onPick: (text: string) => Promise<void> }) {
+  const { kind, items } = chipsFor(bubble);
+  if (items.length === 0) return null;
+  return (
+    <div className="suggestions" aria-label={kind === "answer" ? "답 고르기" : "이어서 물어보기"}>
+      {items.map((q) => (
+        <button
+          key={q}
+          type="button"
+          className={kind === "answer" ? "chip chip-answer" : "chip"}
+          onClick={() => void onPick(q)}
+        >
+          {q}
+        </button>
+      ))}
+    </div>
   );
 }

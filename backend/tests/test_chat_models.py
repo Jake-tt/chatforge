@@ -1,5 +1,8 @@
 """LangChain chat model layer: provider factory and usage_metadata → Usage for billing."""
 
+import json
+
+import httpx
 import pytest
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -7,7 +10,12 @@ from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.services.chat_models import EchoChatModel, build_chat_model, usage_from_message
+from app.services.chat_models import (
+    EchoChatModel,
+    build_chat_model,
+    usage_from_message,
+    warm_up_ollama,
+)
 from app.services.llm import AUX_MAX_TOKENS, Usage
 
 
@@ -129,6 +137,37 @@ def test_ollama_context_window_and_determinism_follow_settings():
                              purpose="aux")
 
     assert (model.num_ctx, model.temperature) == (4096, 0)
+
+
+def test_ollama_keeps_the_model_loaded_by_default():
+    # Unloading after Ollama's default 5 minutes made the next router call wait for the
+    # model to load (about 10s locally) and time out.
+    model = build_chat_model(_settings(llm_provider="ollama"), purpose="main")
+
+    assert model.keep_alive == -1
+
+
+async def test_warm_up_loads_the_model_with_the_options_requests_use():
+    sent: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append({"url": str(request.url), **json.loads(request.content)})
+        return httpx.Response(200, json={"done": True})
+
+    settings = _settings(llm_provider="ollama", ollama_keep_alive="30m")
+    await warm_up_ollama(settings, transport=httpx.MockTransport(handler))
+
+    # A different num_ctx makes Ollama reload the model on the first real request.
+    assert sent == [{"url": "http://localhost:11434/api/generate", "model": "qwen3:8b",
+                     "keep_alive": "30m", "options": {"num_ctx": 8192}}]
+
+
+async def test_a_failed_warm_up_does_not_raise():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("ollama is not running")
+
+    await warm_up_ollama(_settings(llm_provider="ollama"),
+                         transport=httpx.MockTransport(handler))
 
 
 async def test_fake_model_reports_usage_on_invoke_too():

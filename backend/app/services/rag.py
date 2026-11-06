@@ -71,7 +71,9 @@ _FAKE_KEYWORDS = ("요금", "플랜", "한도", "토큰", "계정", "가입", "�
 # Whole words only: "내 " also occurs inside "안내 ".
 _FAKE_ACCOUNT_RE = re.compile(r"(?:^|\s)(?:내|my)\s|남은|remaining")
 _FAKE_PAST_RE = re.compile(r"지난번|저번|earlier|last time")
-_MARKER_RE = re.compile(r"\[(\d+)\]")
+# `[1]`, `[1, 2]`, `[2-4]`; not `x[1]` (indexing), `[2026]` (a year) or `[1](url)` (a link).
+_MARKER_RE = re.compile(r"(?<!\w)\[(\d{1,2}(?:\s*[,\-–]\s*\d{1,2})*)\](?!\()")
+_CODE_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 _PLAN_LABELS = {"guest": "게스트", "free": "무료", "pro": "프로"}
 
 
@@ -228,11 +230,32 @@ def router_prompt(turns: list[ChatTurn]) -> str:
            f"Latest user message: {turns[-1].content}"
 
 
+def clip(text: str, limit: int | None) -> str:
+    return text if limit is None or len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def render_sources(citations: list[Citation], per_source: int | None = None) -> str:
-    def clip(text: str) -> str:
-        return text if per_source is None or len(text) <= per_source \
-            else text[:per_source].rstrip() + "…"
-    return "\n\n".join(f"[{c.n}] {c.title}\n{clip(c.snippet)}" for c in citations)
+    return "\n\n".join(f"[{c.n}] {c.title}\n{clip(c.snippet, per_source)}" for c in citations)
+
+
+def cited_numbers(text: str) -> set[int]:
+    """Source numbers cited in `text`, outside code."""
+    numbers: set[int] = set()
+    for group in _MARKER_RE.findall(_CODE_RE.sub(" ", text)):
+        for part in group.split(","):
+            low, _, high = part.replace("–", "-").partition("-")
+            numbers.update(range(int(low), int(high or low) + 1))
+    return numbers
+
+
+def check_citations(answer: str, citations: list[dict]) -> tuple[list[dict], list[int]]:
+    """Flag each source the answer cites, and return the cited numbers that match none.
+
+    The answer has already streamed when this runs, so a bad marker can't be removed;
+    it's reported instead."""
+    markers = cited_numbers(answer)
+    numbers = {c["n"] for c in citations}
+    return [{**c, "cited": c["n"] in markers} for c in citations], sorted(markers - numbers)
 
 
 def _keeps_citations(summary: str, numbers: set[int], limit: int) -> bool:
@@ -240,7 +263,7 @@ def _keeps_citations(summary: str, numbers: set[int], limit: int) -> bool:
     cites the sources it was given."""
     if not summary.strip() or len(summary) > limit * 1.2:
         return False
-    cited = {int(m) for m in _MARKER_RE.findall(summary)}
+    cited = cited_numbers(summary)
     return bool(cited) and cited <= numbers
 
 

@@ -16,6 +16,10 @@ class Credentials(BaseModel):
     guest_token: str | None = None
 
 
+class PasswordConfirm(BaseModel):
+    password: str = Field(max_length=128)
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -68,6 +72,7 @@ class CitationOut(BaseModel):
     title: str
     url: str
     snippet: str
+    cited: bool = True  # whether the answer cites it; rows stored before the check: yes
 
 
 class MessageOut(BaseModel):
@@ -75,7 +80,10 @@ class MessageOut(BaseModel):
 
     id: uuid.UUID
     role: str
+    kind: str = "answer"
     content: str
+    # Offered with a clarifying question ([] asks for free text); None for an answer.
+    options: list[str] | None = None
     input_tokens: int
     output_tokens: int
     citations: list[CitationOut] | None = None
