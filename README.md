@@ -109,7 +109,7 @@ flowchart LR
 [`migrations/versions/`](backend/migrations/versions)
 
 - `0001`은 회원 전용 스키마이고, `0002`는 게스트를 도입하며 `user_id`를 nullable로 바꾸고 `guest_id`와 CHECK 제약을 추가합니다. 실제 서비스가 진화하는 순서 그대로 작성했습니다.
-- `0003`은 메시지 순번(seq)을 **expand → backfill → contract** 순서로 도입합니다. 컬럼을 추가하고, 기존 메시지에 `ROW_NUMBER()`로 순번을 채운 뒤, NOT NULL과 유니크 제약을 겁니다. 이후 `0004`(인용), `0005`(대화 요약), `0006`(토큰 버전), `0007`(결제 이벤트)이 이어집니다.
+- `0003`은 메시지 순번(seq)을 **expand → backfill → contract** 순서로 도입합니다. 컬럼을 추가하고, 기존 메시지에 `ROW_NUMBER()`로 순번을 채운 뒤, NOT NULL과 유니크 제약을 겁니다. 이후 `0004`(인용), `0005`(대화 요약), `0006`(토큰 버전), `0007`(결제 이벤트), `0008`(메시지 kind·되묻기 선택지)이 이어집니다.
 - 배포 시 **Cloud Run Job으로 마이그레이션을 먼저 실행**하고, 성공해야 새 리비전으로 트래픽을 넘깁니다. 인스턴스가 여러 대로 늘어나도 부팅 시 마이그레이션이 서로 경쟁하지 않습니다.
 - CI에서는 Postgres에 `upgrade → alembic check(모델과 마이그레이션 간 차이 검출) → downgrade → upgrade`를 실행합니다.
 

@@ -364,7 +364,7 @@ erDiagram
 - **사용량 기준값은 `usage_daily`**: 과금 대상 메시지와 같은 트랜잭션에서 UPSERT, 커밋 후 `quota.invalidate`. [ADR](decision-docs/adrs/database-as-source-of-truth-for-quota.md).
 - **결제 멱등**: `payment_events.id` PK + `ON CONFLICT DO NOTHING`.
 
-마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events.
+마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options.
 
 ---
 
