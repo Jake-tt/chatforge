@@ -315,6 +315,8 @@ ollama pull qwen3:8b                            # 16GB Apple Silicon에서 동�
 LLM_PROVIDER=ollama uvicorn app.main:create_app --factory --reload
 ```
 
+서버가 시작할 때 모델을 미리 올리고(`num_ctx`도 실제 요청과 같게), 내리지 않고 유지합니다(`OLLAMA_KEEP_ALIVE=-1`). Ollama 기본값대로 5분 뒤 모델을 내리면, 다음 메시지의 라우터 호출이 모델 로딩(로컬 측정 약 10초)을 기다리다 8초 타임아웃에 걸렸습니다. 메모리를 돌려받으려면 `OLLAMA_KEEP_ALIVE=30m`처럼 시간을 지정하세요.
+
 ## 테스트
 
 ```bash

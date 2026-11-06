@@ -18,7 +18,7 @@ from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, payments, usage
 from app.routers.conversations import drain_unfinished_writes
-from app.services.chat_models import build_chat_model
+from app.services.chat_models import build_chat_model, warm_up_ollama
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
@@ -88,9 +88,15 @@ def create_app(
             chat_model=chat_model or build_chat_model(settings, purpose="main"),
             agent=build_agent_graph(),
         )
+        # In the background: the server can take requests while the model loads, and a
+        # request that arrives first simply waits for the same load.
+        warm_up = asyncio.create_task(warm_up_ollama(settings)) \
+            if settings.llm_provider == "ollama" and chat_model is None else None
         try:
             yield
         finally:
+            if warm_up is not None:
+                warm_up.cancel()
             # Saves for cancelled requests first: they need the database and Redis below.
             # Bounded, within Cloud Run's 10s grace period after SIGTERM.
             with contextlib.suppress(TimeoutError):

@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen3:8b"  # native tool calling; fits a 16GB Apple Silicon machine
     ollama_num_ctx: int = 8192
+    # How long Ollama keeps the model loaded after a request (-1: until Ollama stops, or a
+    # duration like "30m"). Its 5-minute default made the router time out on reload.
+    ollama_keep_alive: int | str = -1
     anthropic_model: str = "claude-opus-5-5"
     llm_effort: Literal["low", "medium", "high", "xhigh", "max"] = "low"
     llm_max_tokens: int = 16000
