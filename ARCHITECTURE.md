@@ -414,6 +414,7 @@ Cloud Run은 응답 후 CPU를 제한할 수 있으므로 운영에서는 in-pro
 | [`api.ts`](frontend/src/api.ts) | 토큰 보관, `authedFetch`(401이면 새 게스트 세션으로 1회 재시도, 동시 호출은 게스트 생성 1회로 합침), SSE 이벤트 디스패치 |
 | [`sse.ts`](frontend/src/sse.ts) | 스트리밍 SSE 파서 (`TextDecoder` 스트림 모드 + 버퍼) |
 | [`sources.ts`](frontend/src/sources.ts) | 인용된 출처만 표시하는 규칙 |
+| [`chips.ts`](frontend/src/chips.ts) | 마지막 메시지 아래 칩 규칙: 되묻기면 답 선택지(빈 배열이면 자유 입력 안내), 답변이면 추천 질문 |
 | `components/` | `ChatPanel`, `Sidebar`, `AuthDialog`, `DeleteAccountDialog` |
 
 첫 방문 시 게스트 토큰으로 시작하고, 가입·로그인 때 게스트 토큰을 함께 보내 서버가 이관합니다. 오류 UI는 `ApiError.code`로 분기합니다(예: 게스트의 `quota_exceeded`면 가입 유도).

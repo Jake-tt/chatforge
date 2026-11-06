@@ -25,7 +25,9 @@ export interface Citation {
 export interface Message {
   id: string;
   role: "user" | "assistant";
+  kind: "answer" | "clarify";
   content: string;
+  options: string[] | null; // offered with a clarifying question; [] asks for free text
   input_tokens: number;
   output_tokens: number;
   citations: Citation[] | null;
@@ -54,6 +56,7 @@ export interface StreamHandlers {
   onDelta: (text: string) => void;
   onSources?: (citations: Citation[]) => void;
   onSuggestions?: (questions: string[]) => void;
+  onClarify?: (options: string[]) => void;
 }
 
 export class ApiError extends Error {
@@ -199,6 +202,8 @@ export const api = {
           handlers.onSources?.((data as { citations: Citation[] }).citations);
         } else if (event === "suggestions") {
           handlers.onSuggestions?.((data as { questions: string[] }).questions);
+        } else if (event === "clarify") {
+          handlers.onClarify?.((data as { options: string[] }).options);
         }
         else if (event === "done") return data as StreamDone;
         else if (event === "error") {
