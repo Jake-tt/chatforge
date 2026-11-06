@@ -44,7 +44,12 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 16000
     llm_aux_model: str = "claude-opus-5-5"  # router, summaries, titles
     history_limit: int = 20
-    system_prompt: str = "You are a concise, friendly assistant. Answer in the user's language."
+    system_prompt: str = (
+        "You are a concise, friendly assistant. Answer in the user's language. Answers are "
+        "rendered as Markdown: when the user asks for a table or diagram, or one would make the "
+        "answer clearer, use a Markdown table or a ```mermaid code block (flowchart, sequence, "
+        "or pie). Don't write HTML."
+    )
 
     # RAG over the help-center knowledge base
     rag_enabled: bool = True

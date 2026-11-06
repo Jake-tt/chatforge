@@ -86,6 +86,21 @@ body { background: var(--bg); color: var(--text); }
 .bubble.user { align-self: flex-end; background: var(--user-bubble); color: #fff; }
 .bubble.assistant { align-self: flex-start; background: var(--assistant-bubble); border: 1px solid var(--border); }
 .note { margin-top: 6px; font-size: 12px; color: var(--muted); }
+
+/* Answers rendered from Markdown: the bubble's pre-wrap would double the line breaks. */
+.md { white-space: normal; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p, .md ul, .md ol, .md pre, .md table, .md .diagram { margin: 8px 0; }
+.md ul, .md ol { padding-left: 20px; }
+.md a { color: var(--accent); }
+.md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+.md pre { overflow-x: auto; padding: 10px 12px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+.md table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
+.md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.md th { background: var(--bg); }
+.md .diagram { overflow-x: auto; }
+.md .diagram svg { max-width: 100%; height: auto; }
 .typing { color: var(--muted); letter-spacing: 2px; animation: pulse 1s infinite; }
 @keyframes pulse { 50% { opacity: 0.3; } }
 

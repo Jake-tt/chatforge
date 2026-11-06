@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api, ApiError, Citation } from "../api";
 import { chipsFor, composerHint } from "../chips";
+import Markdown from "./Markdown";
 import { markCited, shownSources } from "../sources";
 
 interface Bubble {
@@ -138,7 +139,12 @@ export default function ChatPanel(props: Props) {
         )}
         {bubbles.map((b, i) => (
           <div key={b.id} className={`bubble ${b.role}`}>
-            {b.content || (b.pending ? <span className="typing">●●●</span> : null)}
+            {b.content ? (
+              // Users' messages are shown as typed; answers are Markdown (tables, diagrams).
+              b.role === "assistant" ? <Markdown text={b.content} streaming={!!b.pending} /> : b.content
+            ) : b.pending ? (
+              <span className="typing">●●●</span>
+            ) : null}
             {b.note && <div className="note">{b.note}</div>}
             {b.citations && b.citations.length > 0 && (
               <ol className="sources" aria-label="참고한 자료">
