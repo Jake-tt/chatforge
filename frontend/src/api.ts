@@ -22,6 +22,12 @@ export interface Citation {
   snippet: string;
   cited?: boolean; // whether the answer cites it; absent until the answer is checked
 }
+// Shown on returning to a conversation left quiet for a while.
+export interface Recap {
+  recap: string;
+  questions: string[];
+  through_seq: number;
+}
 export interface Message {
   id: string;
   role: "user" | "assistant";
@@ -139,6 +145,11 @@ export const api = {
   listConversations: () => json<Conversation[]>("/conversations"),
   getConversation: (id: string) =>
     json<Conversation & { messages: Message[] }>(`/conversations/${id}`),
+  // null (204) when there is nothing to recap: not left long enough, or too short.
+  getRecap: async (id: string): Promise<Recap | null> => {
+    const res = await authedFetch(`/conversations/${id}/recap`);
+    return res.status === 204 ? null : res.json();
+  },
   createConversation: () =>
     json<Conversation>("/conversations", { method: "POST", body: "{}" }),
   deleteConversation: (id: string) =>

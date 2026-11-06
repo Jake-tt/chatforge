@@ -87,6 +87,13 @@ body { background: var(--bg); color: var(--text); }
 .bubble.assistant { align-self: flex-start; background: var(--assistant-bubble); border: 1px solid var(--border); }
 .note { margin-top: 6px; font-size: 12px; color: var(--muted); }
 
+.recap {
+  align-self: stretch; padding: 12px 14px; border-radius: 12px;
+  border: 1px dashed var(--border); background: var(--panel);
+}
+.recap-title { font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 4px; }
+.recap p { margin: 0; }
+
 /* Answers rendered from Markdown: the bubble's pre-wrap would double the line breaks. */
 .md { white-space: normal; }
 .md > :first-child { margin-top: 0; }

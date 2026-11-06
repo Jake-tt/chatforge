@@ -86,6 +86,11 @@ class Conversation(Base):
     # so a reader always gets a summary and the boundary it covers as a pair.
     summary: Mapped[str | None] = mapped_column(Text)
     summarized_through_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # What to show a user who comes back after a while: written when they reopen the
+    # conversation, for messages up to recap_through_seq, and reused until it moves on.
+    recap: Mapped[str | None] = mapped_column(Text)
+    recap_questions: Mapped[list[str] | None] = mapped_column(JSON)
+    recap_through_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", order_by="Message.seq"

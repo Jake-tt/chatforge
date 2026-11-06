@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     idle_compaction_keep_turns: int = Field(default=1, ge=1)
     idle_compaction_min_tokens: int = 1000  # estimated; a shorter tail isn't worth a call
 
+    # Recap shown on reopening a conversation that has been quiet this long.
+    recap_after_seconds: int = Field(default=3600, ge=0)
+    recap_min_messages: int = 4  # shorter conversations are read at a glance
+    # Loaded apart from the messages, so a slow model only delays the card (a local Qwen 8B
+    # took 10-12s); bounded like summaries.
+    recap_timeout_seconds: float = 30.0
+
     # LangGraph agent (router → coordinator / ReAct tools)
     agent_max_tool_rounds: int = Field(default=3, ge=0, le=5)  # bounds cost per turn
     agent_max_tool_calls: int = Field(default=4, ge=1, le=8)  # per round
