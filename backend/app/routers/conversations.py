@@ -33,6 +33,7 @@ from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
 from app.services.rag import PastSearch, account_snapshot, check_citations
+from app.services.recap import Recap, recap_for
 from app.services.search import SearchHit
 from app.services.turn_gate import Lease
 
@@ -92,6 +93,18 @@ async def get_conversation(
     session: AsyncSession = Depends(get_session),
 ) -> Conversation:
     return await _get_owned(session, principal, conversation_id, with_messages=True)
+
+
+@router.get("/{conversation_id}/recap", response_model=Recap,
+            responses={204: {"description": "No recap: not left long enough, or too short"}})
+async def get_recap(
+    conversation_id: uuid.UUID,
+    ctx: AppContext = Depends(get_ctx),
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> Recap | Response:
+    conversation = await _get_owned(session, principal, conversation_id)
+    return await recap_for(ctx, session, conversation) or Response(status_code=204)
 
 
 @router.delete("/{conversation_id}", status_code=204)
