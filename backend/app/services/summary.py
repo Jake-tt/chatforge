@@ -21,6 +21,12 @@ Rules:
   leaves the conversation as it was: the full window is still sent.
 - Tokens are charged to the conversation's owner only for a summary that was applied.
   Retries and lost races are the service's own cost.
+
+Idle compaction: every reply also schedules a delayed task. If, when it runs, the reply is
+still the conversation's last message, the prompt cache has expired anyway, so keeping the
+tail verbatim saves nothing: it is folded down to the last `idle_compaction_keep_turns`
+turns, and the user comes back to a short prompt. A pending clarifying question is left
+as it is, and a tail too short to be worth a summary call is skipped.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 TASK_NAME = "summarize_conversation"
+IDLE_TASK_NAME = "compact_idle_conversation"
 
 SUMMARY_SYSTEM = (
     "You maintain the running summary of a chat between a user and an assistant. Merge the "
@@ -80,12 +87,26 @@ def needs_summary(settings: Settings, pending: list[ChatTurn]) -> bool:
             or chars // 4 >= settings.summary_trigger_tokens)
 
 
+def wants_idle_compaction(settings: Settings) -> bool:
+    return settings.summary_enabled and settings.idle_compaction_seconds > 0
+
+
 def _cut(messages: list[Message], keep_turns: int) -> list[Message]:
     """Messages to fold into the summary: all before the `keep_turns`-th last user turn."""
     user_positions = [i for i, m in enumerate(messages) if m.role == "user"]
     if len(user_positions) <= keep_turns:
         return []
     return messages[:user_positions[-keep_turns]]
+
+
+async def _still_idle(session, conversation: Conversation, after_seq: int) -> bool:
+    if conversation.message_count != after_seq:
+        return False  # the user came back; the reply after this one scheduled its own run
+    last_kind = await session.scalar(
+        select(Message.kind)
+        .where(Message.conversation_id == conversation.id, Message.seq == after_seq))
+    # Folding now would bury the question the user is about to answer.
+    return last_kind != "clarify"
 
 
 def _owner_subject(conversation: Conversation) -> str:
@@ -103,12 +124,25 @@ async def summarize_conversation(ctx: AppContext, payload: dict) -> None:
     await _fold(ctx, uuid.UUID(payload["conversation_id"]), ctx.settings.summary_keep_turns)
 
 
-async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int) -> None:
-    """Fold the messages before the `keep_turns`-th last user turn into the summary."""
+async def compact_idle_conversation(ctx: AppContext, payload: dict) -> None:
+    await _fold(ctx, uuid.UUID(payload["conversation_id"]),
+                ctx.settings.idle_compaction_keep_turns, idle_after_seq=payload["after_seq"])
+
+
+async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int, *,
+                idle_after_seq: int | None = None) -> None:
+    """Fold the messages before the `keep_turns`-th last user turn into the summary.
+
+    With `idle_after_seq`, only if that message is still the last one and isn't a
+    clarifying question, and only if the fold is worth a summary call.
+    """
     settings = ctx.settings
     async with ctx.sessionmaker() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None or conversation.deleted_at is not None:
+            return
+        if idle_after_seq is not None and not await _still_idle(
+                session, conversation, idle_after_seq):
             return
         start = conversation.summarized_through_seq
         previous = conversation.summary
@@ -122,6 +156,9 @@ async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int) ->
     folded = _cut(messages, keep_turns)
     if not folded:
         return  # already summarized by an earlier delivery
+    if idle_after_seq is not None and \
+            sum(len(m.content) for m in folded) // 4 < settings.idle_compaction_min_tokens:
+        return
 
     limit = settings.conversation_summary_char_limit
     transcript = "\n".join(f"{m.role}: {m.content}" for m in folded)

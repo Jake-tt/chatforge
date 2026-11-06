@@ -465,6 +465,14 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
             # Only an optimisation; the next turn enqueues it again. The reply is stored
             # and charged, so the client must still get `done`.
             log.warning("could not enqueue conversation summary", exc_info=True)
+    if summarize and message is not None and summary.wants_idle_compaction(ctx.settings):
+        try:
+            await ctx.tasks.enqueue(
+                summary.IDLE_TASK_NAME,
+                {"conversation_id": str(job.conversation_id), "after_seq": message.seq},
+                delay_seconds=ctx.settings.idle_compaction_seconds)
+        except Exception:
+            log.warning("could not schedule idle compaction", exc_info=True)
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,

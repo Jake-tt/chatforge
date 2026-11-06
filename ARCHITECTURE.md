@@ -39,7 +39,7 @@ flowchart LR
 |---|---|---|
 | PostgreSQL | 사용자·게스트·대화·메시지·사용량·결제 이벤트 | **예** (모든 정합성의 기준) |
 | Redis | 쿼터 캐시, rate limit, 히스토리 캐시, 턴 입장 제어 | 아니오. 장애 시 DB로 fallback하거나 fail-open |
-| Cloud Tasks | 제목 생성, 대화 요약, 탈퇴 계정 정리 | 아니오. at-least-once, 핸들러 멱등 |
+| Cloud Tasks | 제목 생성, 대화 요약(비활성 압축은 1시간 지연), 탈퇴 계정 정리 | 아니오. at-least-once, 핸들러 멱등 |
 | LLM | 답변(에이전트) + 보조 호출(라우팅·압축·추천 질문·제목·요약) | — |
 | 지식 베이스 | `backend/knowledge/*.md`를 부팅 시 BM25로 색인 | 프로세스 메모리 |
 
@@ -211,7 +211,7 @@ sequenceDiagram
   R->>DB: 새 세션: assistant 메시지 + usage_daily UPSERT (한 트랜잭션), COMMIT
   R->>Q: invalidate(subject)
   R->>H: append(assistant)
-  R->>T: generate_title (첫 메시지) / summarize (임계 초과)
+  R->>T: generate_title (첫 메시지) / summarize (임계 초과) / compact_idle (1시간 뒤)
   R-->>C: done {message_id, tokens, billed_tokens, cited, stop_reason}
   R->>G: release(lease)
 ```
@@ -392,6 +392,7 @@ erDiagram
 |---|---|---|
 | `generate_title` | `tasks.generate_title` | `title IS NULL`일 때만 UPDATE (사용자 변경 제목 보존) |
 | `summarize_conversation` | `summary.summarize_conversation` | 시작 시점 경계와 같을 때만 요약·경계를 함께 UPDATE |
+| `compact_idle_conversation` | `summary.compact_idle_conversation` | 예약 당시 답변이 아직 마지막 메시지이고 되묻기가 아닐 때만, 같은 조건부 UPDATE로 접음 |
 | `purge_user` | `account.purge_user` | 탈퇴 표시된 사용자만, 남은 것만 `PURGE_BATCH_CONVERSATIONS` 단위로 삭제 |
 
 ```mermaid

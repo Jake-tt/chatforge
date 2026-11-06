@@ -152,10 +152,10 @@ async def test_short_conversations_are_not_summarized(make_harness):
 
 
 class FailingQueue(RecordingQueue):
-    async def enqueue(self, name: str, payload: dict) -> None:
-        if name == "summarize_conversation":
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: float = 0) -> None:
+        if name in ("summarize_conversation", "compact_idle_conversation"):
             raise ConnectionError("cloud tasks unavailable")
-        await super().enqueue(name, payload)
+        await super().enqueue(name, payload, delay_seconds=delay_seconds)
 
 
 async def test_failing_to_enqueue_the_summary_still_finishes_the_reply(make_harness):
@@ -195,3 +195,94 @@ def test_keep_turns_must_be_positive():
 
     with pytest.raises(ValidationError):
         Settings(_env_file=None, summary_keep_turns=0)
+
+
+# Idle compaction: an hour after the last reply the prompt cache has expired, so keeping
+# the unsummarized tail verbatim no longer saves anything; fold it down to the last turn.
+IDLE = {**SUMMARY_ON, "summary_trigger_messages": 100, "idle_compaction_min_tokens": 0}
+
+
+async def _idle_harness(make_harness, **settings):
+    llm = ScriptedProvider(summary="사용자는 부산 여행을 계획 중이다.")
+    queue = RecordingQueue()
+    h = await make_harness(llm=llm, chat_model=llm.answers, task_backend="cloudtasks",
+                           tasks=queue, **{**IDLE, **settings})
+    h.app.dependency_overrides[verify_task_caller] = lambda: None
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+    return h, llm, queue, headers, cid
+
+
+def _idle_tasks(queue) -> list[tuple[dict, float]]:
+    return [(payload, delay)
+            for (name, payload), delay in zip(queue.enqueued, queue.delays, strict=True)
+            if name == "compact_idle_conversation"]
+
+
+async def _deliver_idle(h, payload: dict) -> None:
+    r = await h.client.post("/internal/tasks/compact_idle_conversation", json=payload)
+    assert r.status_code == 204
+
+
+async def test_each_reply_schedules_idle_compaction_an_hour_later(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness)
+
+    await h.chat(headers, cid, "one")
+
+    assert _idle_tasks(queue) == [({"conversation_id": cid, "after_seq": 2}, 3600)]
+
+
+async def test_an_idle_conversation_is_folded_down_to_its_last_turn(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness)
+    for message in ("one", "two", "three"):
+        await h.chat(headers, cid, message)
+
+    await _deliver_idle(h, _idle_tasks(queue)[-1][0])
+    await h.chat(headers, cid, "four")
+
+    assert "one" in llm.summary_prompts[0] and "reply 2" in llm.summary_prompts[0]
+    assert "three" not in llm.summary_prompts[0]
+    assert "사용자는 부산 여행을 계획 중이다." in llm.answers.systems[-1]
+    assert llm.answers.turns() == [
+        ("user", "three"), ("assistant", "reply 3"), ("user", "four"),
+    ]
+
+
+async def test_idle_compaction_does_nothing_once_the_conversation_moved_on(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness)
+    for message in ("one", "two", "three"):
+        await h.chat(headers, cid, message)
+
+    await _deliver_idle(h, _idle_tasks(queue)[0][0])  # scheduled after "one", now stale
+
+    assert llm.summary_prompts == []
+
+
+async def test_idle_compaction_never_folds_a_pending_clarifying_question(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness)
+    for message in ("one", "two", "그거 바꿔"):  # the last turn asks the user back
+        await h.chat(headers, cid, message)
+
+    assert len(_idle_tasks(queue)) == 2  # nothing scheduled after the clarifying turn
+    await _deliver_idle(h, {"conversation_id": cid, "after_seq": 6})  # even if delivered
+
+    assert llm.summary_prompts == []
+
+
+async def test_a_short_idle_tail_is_not_worth_a_summary_call(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness,
+                                                      idle_compaction_min_tokens=1000)
+    for message in ("one", "two", "three"):
+        await h.chat(headers, cid, message)
+
+    await _deliver_idle(h, _idle_tasks(queue)[-1][0])
+
+    assert llm.summary_prompts == []
+
+
+async def test_idle_compaction_can_be_turned_off(make_harness):
+    h, llm, queue, headers, cid = await _idle_harness(make_harness, idle_compaction_seconds=0)
+
+    await h.chat(headers, cid, "one")
+
+    assert _idle_tasks(queue) == []

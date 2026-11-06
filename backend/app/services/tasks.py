@@ -57,6 +57,7 @@ async def generate_title(ctx: AppContext, payload: dict) -> None:
 HANDLERS: dict[str, TaskHandler] = {
     "generate_title": generate_title,
     summary.TASK_NAME: summary.summarize_conversation,
+    summary.IDLE_TASK_NAME: summary.compact_idle_conversation,
     account.TASK_NAME: account.purge_user,
 }
 
