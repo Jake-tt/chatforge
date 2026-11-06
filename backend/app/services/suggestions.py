@@ -40,6 +40,26 @@ SUGGESTIONS_SYSTEM = (
 _ARTEFACT_RE = re.compile(r"<ctrl\d+>|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‍﻿]")
 
 
+def clean_chips(value: object, *, limit: int, max_chars: int) -> list[str]:
+    """Model-written strings fit to show as chips: artefacts stripped, JSON fragments,
+    empty, overlong and duplicate entries dropped, at most `limit` kept."""
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        text = " ".join(_ARTEFACT_RE.sub("", item).split()).strip(" \"'")
+        if not text or len(text) > max_chars or text[0] in "{[":
+            continue
+        if (key := text.casefold()) in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    return cleaned[:limit]
+
+
 class FollowUps(BaseModel):
     questions: list[str] = Field(
         default_factory=list,
@@ -49,21 +69,7 @@ class FollowUps(BaseModel):
     @field_validator("questions", mode="before")
     @classmethod
     def _clean(cls, value: object) -> list[str]:
-        if not isinstance(value, list):
-            return []
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            if not isinstance(item, str):
-                continue
-            text = " ".join(_ARTEFACT_RE.sub("", item).split()).strip(" \"'")
-            if not text or len(text) > MAX_CHARS or text[0] in "{[":
-                continue
-            if (key := text.casefold()) in seen:
-                continue
-            seen.add(key)
-            cleaned.append(text)
-        return cleaned[:MAX_SUGGESTIONS]
+        return clean_chips(value, limit=MAX_SUGGESTIONS, max_chars=MAX_CHARS)
 
     @classmethod
     def fake(cls, prompt: str) -> "FollowUps":

@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api, ApiError, Citation } from "../api";
+import { chipsFor, composerHint } from "../chips";
 import { markCited, shownSources } from "../sources";
 
 interface Bubble {
@@ -10,6 +11,7 @@ interface Bubble {
   note?: string;
   citations?: Citation[] | null;
   suggestions?: string[];
+  options?: string[] | null; // set on a clarifying question
 }
 
 interface Props {
@@ -86,6 +88,7 @@ export default function ChatPanel(props: Props) {
           },
           onSources: (citations) => updateLast((b) => ({ ...b, citations })),
           onSuggestions: (suggestions) => updateLast((b) => ({ ...b, suggestions })),
+          onClarify: (options) => updateLast((b) => ({ ...b, options })),
         },
         controller.signal,
       );
@@ -146,16 +149,8 @@ export default function ChatPanel(props: Props) {
                 ))}
               </ol>
             )}
-            {/* Only the latest answer offers follow-ups; older ones would be stale. */}
-            {i === bubbles.length - 1 && !streaming && b.suggestions && b.suggestions.length > 0 && (
-              <div className="suggestions">
-                {b.suggestions.map((q) => (
-                  <button key={q} type="button" className="chip" onClick={() => void send(q)}>
-                    {q}
-                  </button>
-                ))}
-              </div>
-            )}
+            {/* Only the latest message offers chips; older ones would be stale. */}
+            {i === bubbles.length - 1 && !streaming && <Chips bubble={b} onPick={send} />}
           </div>
         ))}
         <div ref={bottomRef} />
@@ -181,7 +176,7 @@ export default function ChatPanel(props: Props) {
       >
         <textarea
           value={input}
-          placeholder="메시지를 입력하세요 (Shift+Enter 줄바꿈)"
+          placeholder={streaming ? composerHint(undefined) : composerHint(bubbles[bubbles.length - 1])}
           rows={1}
           maxLength={8000}
           onChange={(e) => setInput(e.target.value)}
@@ -203,5 +198,24 @@ export default function ChatPanel(props: Props) {
         )}
       </form>
     </section>
+  );
+}
+
+function Chips({ bubble, onPick }: { bubble: Bubble; onPick: (text: string) => Promise<void> }) {
+  const { kind, items } = chipsFor(bubble);
+  if (items.length === 0) return null;
+  return (
+    <div className="suggestions" aria-label={kind === "answer" ? "답 고르기" : "이어서 물어보기"}>
+      {items.map((q) => (
+        <button
+          key={q}
+          type="button"
+          className={kind === "answer" ? "chip chip-answer" : "chip"}
+          onClick={() => void onPick(q)}
+        >
+          {q}
+        </button>
+      ))}
+    </div>
   );
 }

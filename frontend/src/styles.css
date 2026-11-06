@@ -147,3 +147,4 @@ body { background: var(--bg); color: var(--text); }
   background: var(--bg); color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
 }
 .chip:hover, .chip:focus-visible { border-color: var(--accent); color: var(--accent); }
+.chip-answer { border-color: var(--accent); color: var(--accent); }

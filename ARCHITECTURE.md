@@ -206,8 +206,8 @@ sequenceDiagram
   R-->>C: 200 text/event-stream, ": routing"
   R->>A: astream(turns, context=AgentContext, stream_mode=[messages, updates])
   A-->>C: sources / delta …
-  R->>R: suggestions 생성 (clarify 턴 제외)
-  R-->>C: suggestions
+  R->>R: suggestions 생성 (clarify 턴은 대신 선택지)
+  R-->>C: suggestions 또는 clarify
   R->>DB: 새 세션: assistant 메시지 + usage_daily UPSERT (한 트랜잭션), COMMIT
   R->>Q: invalidate(subject)
   R->>H: append(assistant)
@@ -234,6 +234,7 @@ sequenceDiagram
 | `sources` | `{citations}` | coordinator·도구가 출처를 붙였을 때 |
 | `delta` | `{text}` | agent 노드의 토큰 (라우터 호출·도구 라운드 서두는 걸러냄) |
 | `suggestions` | `{questions}` | 답변 뒤, 선택 |
+| `clarify` | `{options}` | 되묻는 턴의 답 뒤. 빈 배열이면 자유 입력 |
 | `done` | `{message_id, input/output/cache 토큰, billed_tokens, cited, stop_reason}` | 저장·과금 완료 후 |
 | `error` | `{code, message, retryable}` | 스트림 도중 실패 |
 
@@ -249,7 +250,7 @@ POST라서 `EventSource`를 쓰지 못하고, [`frontend/src/sse.ts`](frontend/s
 flowchart LR
   S((START)) --> router
   router -- "route 실패" --> agent
-  router -- "needs_clarification" --> clarify --> E((END))
+  router -- "needs_clarification (직전 턴이 되묻기가 아닐 때)" --> clarify --> E((END))
   router -- "plan.any" --> coordinator --> agent
   router -- "소스 불필요" --> agent
   agent -- "tool_calls" --> tools --> agent
@@ -260,8 +261,8 @@ router 뒤의 세 갈래는 노드가 아니라 `add_conditional_edges("router",
 
 | 노드 | 하는 일 |
 |---|---|
-| `router` | `RagPipeline.classify`로 구조화 출력 1회 → `AgentRoute`(검색·계정·지난 대화 필요 여부, 독립 쿼리, 되묻기) → `SourcePlan` 확정 |
-| `clarify` | 라우터의 되묻는 질문을 그대로 답으로 사용. 이 턴은 추천 질문·요약 제외 |
+| `router` | `RagPipeline.classify`로 구조화 출력 1회 → `AgentRoute`(검색·계정·지난 대화 필요 여부, 독립 쿼리, 되묻기와 선택지) → `SourcePlan` 확정 |
+| `clarify` | 라우터의 되묻는 질문을 그대로 답으로, 선택지를 `clarify` 이벤트로 보냄. 메시지는 `kind="clarify"`로 저장. 이 턴은 추천 질문·요약 제외. 직전 assistant 턴이 되묻기였으면 이 노드로 가지 않고, agent가 현재 턴 context의 안내에 따라 가정을 밝히고 답함 |
 | `coordinator` | 계획된 소스(도움말 BM25, 계정 현황, 지난 대화)를 `asyncio.gather`로 병렬 조회, 현재 턴의 `context`에 번호 붙은 출처로 첨부 |
 | `agent` | 답변 모델 호출. 도구 라운드가 남았으면 `bind_tools`. 깨진 도구 호출은 도구 없이 1회 재시도. 호출마다 타임아웃 |
 | `tools` | 라운드당 최대 `AGENT_MAX_TOOL_CALLS`개를 병렬 실행, 초과분은 에러로 반환, 출처 번호를 이어서 매김 |
@@ -413,6 +414,7 @@ Cloud Run은 응답 후 CPU를 제한할 수 있으므로 운영에서는 in-pro
 | [`api.ts`](frontend/src/api.ts) | 토큰 보관, `authedFetch`(401이면 새 게스트 세션으로 1회 재시도, 동시 호출은 게스트 생성 1회로 합침), SSE 이벤트 디스패치 |
 | [`sse.ts`](frontend/src/sse.ts) | 스트리밍 SSE 파서 (`TextDecoder` 스트림 모드 + 버퍼) |
 | [`sources.ts`](frontend/src/sources.ts) | 인용된 출처만 표시하는 규칙 |
+| [`chips.ts`](frontend/src/chips.ts) | 마지막 메시지 아래 칩 규칙: 되묻기면 답 선택지(빈 배열이면 자유 입력 안내), 답변이면 추천 질문 |
 | `components/` | `ChatPanel`, `Sidebar`, `AuthDialog`, `DeleteAccountDialog` |
 
 첫 방문 시 게스트 토큰으로 시작하고, 가입·로그인 때 게스트 토큰을 함께 보내 서버가 이관합니다. 오류 UI는 `ApiError.code`로 분기합니다(예: 게스트의 `quota_exceeded`면 가입 유도).

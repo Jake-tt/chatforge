@@ -320,6 +320,66 @@ async def test_a_long_clarifying_question_is_trimmed_not_dropped(make_harness):
     assert result.text == "가" * 200
 
 
+def _clarify(question: str = "어떤 요금제를 말씀하시나요?", options: list | None = None):
+    return _route(needs_clarification=True, clarifying_question=question,
+                  clarifying_options=options or [])
+
+
+async def _last_message(h, headers, cid) -> dict:
+    r = await h.client.get(f"/conversations/{cid}", headers=headers)
+    return r.json()["messages"][-1]
+
+
+async def test_a_clarifying_question_offers_cleaned_options_and_keeps_them(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_clarify(options=["프로", " 프로 ", "<ctrl46>팀", "", "가" * 41])],
+        agent=[])
+
+    result = await h.chat(headers, cid, "그거 바꾸고 싶어")
+
+    names = [e for e, _ in result.events]
+    assert names.index("clarify") < names.index("done")
+    assert result.last("clarify")["options"] == ["프로", "팀"]
+    stored = await _last_message(h, headers, cid)
+    assert (stored["kind"], stored["options"]) == ("clarify", ["프로", "팀"])
+
+
+async def test_a_clarifying_question_without_options_asks_for_free_text(make_harness):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_clarify(question="어떤 상황인지 알려주시겠어요?")], agent=[])
+
+    result = await h.chat(headers, cid, "이거 왜 이래")
+
+    assert result.last("clarify")["options"] == []
+    stored = await _last_message(h, headers, cid)
+    assert (stored["kind"], stored["options"]) == ("clarify", [])
+
+
+@pytest.mark.parametrize("from_cache", [True, False])
+async def test_a_second_clarification_in_a_row_answers_on_a_stated_assumption(
+        make_harness, from_cache):
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_clarify(), _clarify(), _clarify()],
+        agent=[_answer("프로 요금제로 보고 답할게요. 아니라면 알려주세요.")])
+    await h.chat(headers, cid, "그거 바꾸고 싶어")
+    if not from_cache:
+        await h.ctx.redis.flushdb()  # the previous turn's kind must come from the database
+
+    result = await h.chat(headers, cid, "그거 말이야")
+
+    # Asking twice in a row is how a turn turns into an endless interview.
+    assert "clarify" not in [e for e, _ in result.events]
+    assert result.text == "프로 요금제로 보고 답할게요. 아니라면 알려주세요."
+    first = agent.calls[0]["messages"]
+    assert "already asked" in first[-1].content
+    assert "already asked" not in first[0].content  # the cached system prompt is unchanged
+    assert (await _last_message(h, headers, cid))["kind"] == "answer"
+
+    # The user says the assumption was wrong: the last turn was an answer, so ask again.
+    again = await h.chat(headers, cid, "아니, 다른 거")
+    assert again.text == "어떤 요금제를 말씀하시나요?"
+
+
 async def test_prefetched_and_tool_sources_are_numbered_continuously(make_harness):
     h, agent, headers, cid = await _agent_harness(
         make_harness, routes=[_route(needs_search=True, query="일일 토큰 한도")],

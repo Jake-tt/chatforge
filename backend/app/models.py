@@ -107,7 +107,12 @@ class Message(Base):
     # lets caches detect a missing message: cached seqs must be contiguous.
     seq: Mapped[int] = mapped_column(Integer)
     role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    # What an assistant message is: "answer", or "clarify" (a question back to the user).
+    # Kept apart from `role`, which is what the model API sees.
+    kind: Mapped[str] = mapped_column(String(16), default="answer", server_default="answer")
     content: Mapped[str] = mapped_column(Text)
+    # Answers offered with a clarifying question; [] means a free-text answer is expected.
+    options: Mapped[list[str] | None] = mapped_column(JSON)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     output_tokens: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Sources the answer was grounded on: [{n, title, url, snippet}], assistant only.
