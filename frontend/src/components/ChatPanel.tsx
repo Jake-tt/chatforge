@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, Citation } from "../api";
+import { api, ApiError, Citation, Recap } from "../api";
 import { chipsFor, composerHint } from "../chips";
 import Markdown from "./Markdown";
 import { markCited, shownSources } from "../sources";
@@ -36,6 +36,7 @@ export default function ChatPanel(props: Props) {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
+  const [recap, setRecap] = useState<Recap | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // History is loaded once per mount; the parent remounts on navigation (see App panelKey).
@@ -48,6 +49,11 @@ export default function ChatPanel(props: Props) {
     api.getConversation(id).then((conv) => {
       if (!cancelled) setBubbles(conv.messages.map((m) => ({ ...m })));
     });
+    // Separate so the messages don't wait for it; a missing recap is no error.
+    api.getRecap(id).then(
+      (r) => !cancelled && setRecap(r),
+      () => undefined,
+    );
     return () => {
       cancelled = true;
       abortRef.current?.abort();
@@ -67,6 +73,7 @@ export default function ChatPanel(props: Props) {
 
     setInput("");
     setError(null);
+    setRecap(null); // picked back up: it has done its job
     setStreaming(true);
     setBubbles((prev) => [
       ...prev,
@@ -134,6 +141,21 @@ export default function ChatPanel(props: Props) {
               <p className="muted">
                 로그인 없이 바로 쓸 수 있어요. 나중에 가입하면 지금까지의 대화가 계정으로 옮겨져요.
               </p>
+            )}
+          </div>
+        )}
+        {recap && (
+          <div className="recap" aria-label="지난 대화 요약">
+            <div className="recap-title">지난 대화</div>
+            <p>{recap.recap}</p>
+            {!streaming && recap.questions.length > 0 && (
+              <div className="suggestions">
+                {recap.questions.map((q) => (
+                  <button key={q} type="button" className="chip" onClick={() => void send(q)}>
+                    {q}
+                  </button>
+                ))}
+              </div>
             )}
           </div>
         )}
