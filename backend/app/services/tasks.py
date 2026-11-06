@@ -5,7 +5,8 @@ Work that shouldn't block the chat response (e.g. titling a conversation) goes t
 back into `/internal/tasks/{name}` with an OIDC token. Cloud Run may throttle CPU once a
 response is sent, so in production background work must not rely on in-process tasks.
 
-Handlers must be idempotent: Cloud Tasks delivers at least once.
+Handlers must be idempotent: Cloud Tasks delivers at least once. A task can be delayed
+(`delay_seconds`); a delayed handler must check that what it was scheduled for still holds.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 
 from sqlalchemy import update
@@ -60,7 +62,7 @@ HANDLERS: dict[str, TaskHandler] = {
 
 
 class TaskQueue(Protocol):
-    async def enqueue(self, name: str, payload: dict) -> None: ...
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: float = 0) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -69,13 +71,19 @@ class InlineTaskQueue:
     def __init__(self, ctx_getter: Callable[[], AppContext]):
         self._ctx_getter = ctx_getter
         self._running: set[asyncio.Task] = set()
+        # Kept apart from `_running`: a delay can be an hour, and neither tests nor shutdown
+        # should wait it out. Closing the queue drops them, as a restart would.
+        self._delayed: set[asyncio.Task] = set()
 
-    async def enqueue(self, name: str, payload: dict) -> None:
-        task = asyncio.create_task(self._run(name, payload))
-        self._running.add(task)  # keep a strong ref until done
-        task.add_done_callback(self._running.discard)
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: float = 0) -> None:
+        tasks = self._delayed if delay_seconds > 0 else self._running
+        task = asyncio.create_task(self._run(name, payload, delay_seconds))
+        tasks.add(task)  # keep a strong ref until done
+        task.add_done_callback(tasks.discard)
 
-    async def _run(self, name: str, payload: dict) -> None:
+    async def _run(self, name: str, payload: dict, delay_seconds: float = 0) -> None:
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
         try:
             await HANDLERS[name](self._ctx_getter(), payload)
         except Exception:
@@ -87,6 +95,8 @@ class InlineTaskQueue:
             await asyncio.gather(*self._running, return_exceptions=True)
 
     async def close(self) -> None:
+        for task in self._delayed:
+            task.cancel()
         await self.drain()
 
 
@@ -102,7 +112,7 @@ class CloudTasksQueue:
         self._base_url = settings.tasks_service_url.rstrip("/")
         self._invoker_sa = settings.tasks_invoker_sa
 
-    async def enqueue(self, name: str, payload: dict) -> None:
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: float = 0) -> None:
         tasks_v2 = self._tasks_v2
         task = tasks_v2.Task(
             http_request=tasks_v2.HttpRequest(
@@ -115,6 +125,8 @@ class CloudTasksQueue:
                 ),
             )
         )
+        if delay_seconds > 0:
+            task.schedule_time = datetime.now(UTC) + timedelta(seconds=delay_seconds)
         await self._client.create_task(parent=self._parent, task=task)
 
     async def close(self) -> None:
