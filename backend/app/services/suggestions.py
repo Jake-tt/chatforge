@@ -40,6 +40,11 @@ SUGGESTIONS_SYSTEM = (
 _ARTEFACT_RE = re.compile(r"<ctrl\d+>|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f​-‍﻿]")
 
 
+def clean_text(text: str) -> str:
+    """Model-written text without tokenizer artefacts, control characters or extra spaces."""
+    return " ".join(_ARTEFACT_RE.sub("", text).split())
+
+
 def clean_chips(value: object, *, limit: int, max_chars: int) -> list[str]:
     """Model-written strings fit to show as chips: artefacts stripped, JSON fragments,
     empty, overlong and duplicate entries dropped, at most `limit` kept."""
@@ -50,7 +55,7 @@ def clean_chips(value: object, *, limit: int, max_chars: int) -> list[str]:
     for item in value:
         if not isinstance(item, str):
             continue
-        text = " ".join(_ARTEFACT_RE.sub("", item).split()).strip(" \"'")
+        text = clean_text(item).strip(" \"'")
         if not text or len(text) > max_chars or text[0] in "{[":
             continue
         if (key := text.casefold()) in seen:
