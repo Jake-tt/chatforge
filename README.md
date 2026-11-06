@@ -308,7 +308,9 @@ Redis가 없어도 서버는 동작합니다. 위의 장애 대응 경로가 그
 **로컬 LLM으로 에이전트 실행 (Ollama, 과금 없음)**
 
 ```bash
-ollama pull qwen3:8b && ollama serve &          # 16GB Apple Silicon에서 동작
+brew install ollama                             # 또는 ollama.com/download 앱 설치
+ollama serve &                                  # 앱이나 brew services로 띄웠으면 생략
+ollama pull qwen3:8b                            # 16GB Apple Silicon에서 동작
 LLM_PROVIDER=ollama uvicorn app.main:create_app --factory --reload
 ```
 
