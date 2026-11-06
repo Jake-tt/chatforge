@@ -45,6 +45,41 @@ async def test_suggestions_are_streamed_before_done_and_charged(make_harness):
     assert used == done["billed_tokens"]
 
 
+class RecordingSuggestions(FakeProvider):
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    async def structured(self, system, prompt, schema):
+        if schema is FollowUps:
+            self.prompts.append(prompt)
+        return await super().structured(system, prompt, schema)
+
+
+async def test_suggestions_see_the_earlier_turns_not_only_the_last_exchange(make_harness):
+    llm = RecordingSuggestions()
+    h = await make_harness(llm=llm, suggestions_enabled=True)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    await h.chat(headers, cid, "프로 요금제 알려줘")
+    await h.chat(headers, cid, "그럼 팀 요금제는?")
+
+    later = llm.prompts[-1]
+    assert "프로 요금제 알려줘" in later
+    assert later.index("프로 요금제 알려줘") < later.index("그럼 팀 요금제는?")
+
+
+async def test_questions_the_user_already_asked_are_not_suggested_again(make_harness):
+    h = await make_harness(suggestions_enabled=True)
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    await h.chat(headers, cid, "더 자세히 설명해줘")
+    result = await h.chat(headers, cid, "요금제 알려줘")
+
+    assert result.last("suggestions")["questions"] == ["예시를 들어줄래?"]
+
+
 class SlowSuggestions(FakeProvider):
     async def structured(self, system, prompt, schema):
         if schema is FollowUps:  # only the suggestion call; the router stays fast
