@@ -122,6 +122,20 @@ class QuotaService:
         count = await self._guard.call(incr, 0)  # fail open
         return count > limit
 
+    async def take_daily(self, bucket: str, limit: int) -> bool:
+        """Count one use of a daily allowance (resets with the token quota); False once
+        `limit` is used up. Fails closed: it guards paid calls, so no Redis means no use."""
+        key = f"daily:{bucket}:{self.today().isoformat()}"
+
+        async def incr(r: Redis) -> int:
+            async with r.pipeline(transaction=True) as pipe:
+                pipe.incr(key)
+                pipe.expire(key, 2 * 86_400)
+                count, _ = await pipe.execute()
+            return count
+
+        return await self._guard.call(incr, limit + 1) <= limit
+
     async def reset_rate_limit(self, bucket: str, window_seconds: int) -> None:
         key = self._window_key(bucket, window_seconds)
         await self._guard.call(lambda r: r.delete(key), None)

@@ -28,6 +28,7 @@ from app.services.search import BM25Search, SearchProvider, load_markdown_corpus
 from app.services.suggestions import SuggestionService
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 from app.services.turn_gate import TurnGate
+from app.services.web_search import TavilySearch, WebSearchProvider
 
 
 def build_redis(settings: Settings) -> Redis:
@@ -51,6 +52,7 @@ def create_app(
     tasks: TaskQueue | None = None,
     search: SearchProvider | None = None,
     chat_model: BaseChatModel | None = None,
+    web_search: WebSearchProvider | None = None,
 ) -> FastAPI:
     """App factory. Tests inject settings, fake Redis/LLM/search and a task queue."""
     settings = settings or get_settings()
@@ -69,6 +71,9 @@ def create_app(
                            cooldown_seconds=settings.redis_cooldown_seconds)
         provider = llm or build_provider(settings)
         rag = _build_rag(settings, provider, search)
+        tavily = TavilySearch(settings.tavily_api_key.get_secret_value(),
+                              timeout_seconds=settings.web_search_timeout_seconds) \
+            if settings.web_search_enabled and web_search is None else None
         app.state.ctx = AppContext(
             settings=settings,
             engine=engine,
@@ -87,6 +92,7 @@ def create_app(
                            settings.max_concurrent_streams),
             chat_model=chat_model or build_chat_model(settings, purpose="main"),
             agent=build_agent_graph(),
+            web_search=(web_search or tavily) if settings.web_search_enabled else None,
         )
         try:
             yield
@@ -97,6 +103,8 @@ def create_app(
                 async with asyncio.timeout(8.0):
                     await drain_unfinished_writes()
             await queue.close()
+            if tavily is not None:
+                await tavily.close()
             if redis is None:
                 await redis_client.aclose()
             await engine.dispose()

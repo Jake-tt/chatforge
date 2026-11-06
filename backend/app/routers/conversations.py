@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from app.agent.graph import AgentContext
 from app.agent.stream import AgentStream
-from app.agent.tools import build_tools
+from app.agent.tools import WebSearch, build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
@@ -242,6 +242,20 @@ def _past_search(ctx: AppContext, principal: Principal,
     return search
 
 
+def _web_search(ctx: AppContext, principal: Principal) -> WebSearch | None:
+    provider = ctx.web_search
+    if provider is None:
+        return None
+
+    async def search(query: str) -> list[SearchHit] | None:
+        limit = ctx.settings.daily_web_searches(principal.plan)
+        if not await ctx.quota.take_daily(f"web:{principal.subject}", limit):
+            return None
+        async with asyncio.timeout(ctx.settings.web_search_timeout_seconds):
+            return await provider.search(query, ctx.settings.web_search_top_k)
+    return search
+
+
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -401,7 +415,7 @@ def _agent_context(job: ReplyJob) -> AgentContext:
     ctx, s = job.ctx, job.ctx.settings
     return AgentContext(
         model=ctx.chat_model, rag=ctx.rag,
-        tools=build_tools(s, ctx.rag, job.account, job.past),
+        tools=build_tools(s, ctx.rag, job.account, job.past, _web_search(ctx, job.principal)),
         system=job.system, account=job.account, past=job.past,
         max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
         timeout_seconds=s.agent_timeout_seconds,

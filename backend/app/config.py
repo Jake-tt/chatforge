@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     guest_daily_tokens: int = 20_000
     free_daily_tokens: int = 200_000
     pro_daily_tokens: int = 2_000_000
+
+    # Web search (agent tool, Tavily). Each search spends a Tavily credit, so it is capped
+    # per user per day, and the cap fails closed when Redis is down.
+    web_search_enabled: bool = False
+    tavily_api_key: SecretStr | None = None  # TAVILY_API_KEY; Secret Manager in prod
+    web_search_top_k: int = 3
+    web_search_timeout_seconds: float = 8.0
+    guest_daily_web_searches: int = 3
+    free_daily_web_searches: int = 20
+    pro_daily_web_searches: int = 100
     # Quotas count input-token equivalents: each token kind is weighted by its price
     # relative to an uncached input token (defaults: claude-opus-5-5 list prices).
     token_weight_output: float = 5.0
@@ -121,6 +131,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
+        if self.web_search_enabled and not self.tavily_api_key:
+            raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
         if self.env == "prod":
             if self.jwt_secret.get_secret_value() == _DEV_JWT_SECRET:
                 raise ValueError("JWT_SECRET must be set in prod")
@@ -150,6 +162,13 @@ class Settings(BaseSettings):
             "guest": self.guest_daily_tokens,
             "free": self.free_daily_tokens,
             "pro": self.pro_daily_tokens,
+        }[plan]
+
+    def daily_web_searches(self, plan: str) -> int:
+        return {
+            "guest": self.guest_daily_web_searches,
+            "free": self.free_daily_web_searches,
+            "pro": self.pro_daily_web_searches,
         }[plan]
 
 
