@@ -248,6 +248,19 @@ async def test_an_idle_conversation_is_folded_down_to_its_last_turn(make_harness
     ]
 
 
+async def test_idle_compaction_is_not_charged_to_the_user(make_harness):
+    # The user didn't ask for it and may never come back: the service pays.
+    h, llm, queue, headers, cid = await _idle_harness(make_harness)
+    for message in ("one", "two", "three"):
+        await h.chat(headers, cid, message)
+    used_before = (await h.client.get("/usage", headers=headers)).json()["used"]
+
+    await _deliver_idle(h, _idle_tasks(queue)[-1][0])
+
+    assert llm.summary_prompts, "the tail should have been folded"
+    assert (await h.client.get("/usage", headers=headers)).json()["used"] == used_before
+
+
 async def test_idle_compaction_does_nothing_once_the_conversation_moved_on(make_harness):
     h, llm, queue, headers, cid = await _idle_harness(make_harness)
     for message in ("one", "two", "three"):

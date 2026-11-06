@@ -26,7 +26,8 @@ Idle compaction: every reply also schedules a delayed task. If, when it runs, th
 still the conversation's last message, the prompt cache has expired anyway, so keeping the
 tail verbatim saves nothing: it is folded down to the last `idle_compaction_keep_turns`
 turns, and the user comes back to a short prompt. A pending clarifying question is left
-as it is, and a tail too short to be worth a summary call is skipped.
+as it is, and a tail too short to be worth a summary call is skipped. Its tokens are the
+service's cost: the user didn't ask for it and may never come back.
 """
 
 from __future__ import annotations
@@ -134,7 +135,7 @@ async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int, *,
     """Fold the messages before the `keep_turns`-th last user turn into the summary.
 
     With `idle_after_seq`, only if that message is still the last one and isn't a
-    clarifying question, and only if the fold is worth a summary call.
+    clarifying question, and only if the fold is worth a summary call; it isn't charged.
     """
     settings = ctx.settings
     async with ctx.sessionmaker() as session:
@@ -187,10 +188,16 @@ async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int, *,
             await session.rollback()
             log.info("conversation summary superseded by a concurrent run")
             return
-        await ctx.quota.add_usage(session, subject, result.usage.billed(settings.token_weights()))
+        charged = idle_after_seq is None
+        if charged:
+            await ctx.quota.add_usage(session, subject,
+                                      result.usage.billed(settings.token_weights()))
         await session.commit()
-    await ctx.quota.invalidate(subject)
+    if charged:
+        await ctx.quota.invalidate(subject)
     log.info("conversation summarized", extra={
         "through_seq": folded[-1].seq, "folded_messages": len(folded),
-        "summary_chars": len(summary),
+        "summary_chars": len(summary), "idle": not charged,
+        # Uncharged runs are the service's cost; logged so it can be watched.
+        "input_tokens": result.usage.input_tokens, "output_tokens": result.usage.output_tokens,
     })
