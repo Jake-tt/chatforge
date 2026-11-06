@@ -39,6 +39,8 @@ include = ["app*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+# A test that runs this long is hung: dump every thread's stack (tests take well under 1s).
+faulthandler_timeout = 120
 
 [tool.ruff]
 line-length = 100

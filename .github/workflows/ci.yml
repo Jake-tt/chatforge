@@ -32,6 +32,7 @@ jobs:
   # Always runs: check --strict-paths also validates doc_refs (plan/, decision-docs/).
   decisions:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,6 +49,8 @@ jobs:
     # Runs when the filter could not decide (changes failed), so a broken filter never passes as skipped.
     if: ${{ !cancelled() && needs.changes.outputs.backend != 'false' }}
     runs-on: ubuntu-latest
+    # The default is 6 hours: a hung test would hold the runner (and the PR) that long.
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -80,6 +83,9 @@ jobs:
           alembic upgrade head
       - name: Tests (Postgres)
         run: pytest -q
+        # faulthandler_timeout (pyproject) dumps every thread's stack first, so the log
+        # shows where a hung test is stuck.
+        timeout-minutes: 10
         env:
           TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
 
@@ -87,6 +93,7 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.frontend != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: frontend
