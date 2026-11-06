@@ -42,6 +42,8 @@ SERVICE_URL="https://${SERVICE}-${PROJECT_NUMBER}.${REGION}.run.app"
 
 # Payment webhooks stay off (no PAYMENT_WEBHOOK_SECRET) until a provider is connected:
 # create the secret, then add PAYMENT_WEBHOOK_SECRET=PAYMENT_WEBHOOK_SECRET:latest below.
+# Web search stays off (WEB_SEARCH_ENABLED unset) the same way: create a TAVILY_API_KEY
+# secret, then add TAVILY_API_KEY=TAVILY_API_KEY:latest below and WEB_SEARCH_ENABLED=true.
 gcloud run deploy "$SERVICE" --image "$IMAGE" --region "$REGION" \
   --service-account "$RUNTIME_SA" --allow-unauthenticated \
   --add-cloudsql-instances "$SQL_CONN" \

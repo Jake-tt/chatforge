@@ -15,6 +15,9 @@ from app.config import Settings
 from app.services.rag import Citation, PastSearch, RagPipeline, clip, render_sources
 from app.services.search import SearchHit
 
+# Runs one web search for the caller, or returns None when their daily allowance is spent.
+WebSearch = Callable[[str], Awaitable[list[SearchHit] | None]]
+
 
 @dataclass(frozen=True)
 class ToolOutput:
@@ -71,7 +74,7 @@ class Tool:
 
 
 def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
-                past: PastSearch | None) -> list[Tool]:
+                past: PastSearch | None, web: WebSearch | None = None) -> list[Tool]:
     tools: list[Tool] = []
     budget = settings.tool_result_char_budget
     help_center = rag.search
@@ -100,4 +103,17 @@ def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
 
         tools.append(Tool("get_account_usage", "This user's plan and today's token usage.",
                           NoArgs, get_account))
+
+    if web is not None:
+        async def search_web(query: str) -> ToolOutput:
+            hits = await web(query)
+            if hits is None:
+                return ToolOutput.failed("the user's daily web search limit is reached. "
+                                         "Answer without searching and say so.")
+            return ToolOutput.of(hits, budget)
+
+        tools.append(Tool("search_web", "Search the web for current or general information "
+                          "the other tools don't cover, such as news, weather, prices or "
+                          "recent events. Each search is limited per user per day.",
+                          QueryArgs, search_web))
     return tools

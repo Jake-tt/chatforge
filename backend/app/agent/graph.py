@@ -66,8 +66,9 @@ AGENT_ROUTER_SYSTEM = ROUTER_SYSTEM + (
 
 TOOLS_NOTE = """
 
-You can call tools to look up the help center, this user's account, and their earlier \
-conversations. Call one only when the sources you already have don't answer the question. \
+You can call tools to look up the help center, this user's account, their earlier \
+conversations and, when offered, the web. Call one only when the sources you already have \
+don't answer the question. \
 Do not write any text in a message that calls tools. Cite sources inline by number, like [1]."""
 
 # Sent with the current turn, not the system prompt, so the cached prefix stays the same.
