@@ -138,6 +138,7 @@ flowchart LR
 
 - 구조화 출력은 JSON 형태를 보장할 뿐 내용까지 보장하지는 않습니다. 추천 질문은 UI에 그대로 노출되므로 Pydantic validator에서 제어문자와 `<ctrlNN>` 같은 토큰 잔여물, 문자열에 섞인 JSON, 빈 값, 중복, 지나치게 긴 항목을 걸러냅니다.
 - 타임아웃, 오류, 거부 응답일 때는 추천 없이 정상 응답만 보냅니다. 부가 기능의 실패가 답변 실패로 번지지 않게 하기 위해서입니다.
+- 추천 질문은 마지막 질문과 답변만이 아니라 그 앞의 최근 4개 턴도 함께 보고 만듭니다. "그럼 팀 요금제는?"처럼 짧은 후속 메시지만 보면 대화 주제를 잃은 질문이 나오기 때문입니다. 사용자가 이 대화에서 이미 한 질문은 추천하지 않습니다.
 
 ### 9. 토큰 비용: 가중 과금과 프롬프트 캐싱
 [`app/services/llm.py`](backend/app/services/llm.py) · 테스트 [`test_billing.py`](backend/tests/test_billing.py) · [`test_prompt_cache.py`](backend/tests/test_prompt_cache.py)
