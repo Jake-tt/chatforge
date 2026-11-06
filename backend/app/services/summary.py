@@ -100,8 +100,12 @@ def _is_usable(summary: str, limit: int) -> bool:
 
 
 async def summarize_conversation(ctx: AppContext, payload: dict) -> None:
+    await _fold(ctx, uuid.UUID(payload["conversation_id"]), ctx.settings.summary_keep_turns)
+
+
+async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int) -> None:
+    """Fold the messages before the `keep_turns`-th last user turn into the summary."""
     settings = ctx.settings
-    conversation_id = uuid.UUID(payload["conversation_id"])
     async with ctx.sessionmaker() as session:
         conversation = await session.get(Conversation, conversation_id)
         if conversation is None or conversation.deleted_at is not None:
@@ -115,7 +119,7 @@ async def summarize_conversation(ctx: AppContext, payload: dict) -> None:
             .order_by(Message.seq)
             .limit(settings.summary_batch_messages)
         ))
-    folded = _cut(messages, settings.summary_keep_turns)
+    folded = _cut(messages, keep_turns)
     if not folded:
         return  # already summarized by an earlier delivery
 
