@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     summary_batch_messages: int = 40  # most messages folded per run; backlogs take several
     conversation_summary_char_limit: int = 2000
     summary_timeout_seconds: float = 30.0
+    # An hour after the last reply the prompt cache (at most 1h) has expired, so the
+    # unsummarized tail is folded down to the last turn before the user comes back.
+    idle_compaction_seconds: int = Field(default=3600, ge=0)  # 0 turns it off
+    idle_compaction_keep_turns: int = Field(default=1, ge=1)
+    idle_compaction_min_tokens: int = 1000  # estimated; a shorter tail isn't worth a call
 
     # LangGraph agent (router → coordinator / ReAct tools)
     agent_max_tool_rounds: int = Field(default=3, ge=0, le=5)  # bounds cost per turn

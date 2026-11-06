@@ -1,16 +1,22 @@
-"""Cloud Tasks callback endpoint (/internal/tasks/{name})."""
+"""Cloud Tasks callback endpoint (/internal/tasks/{name}) and the in-process queue."""
+
+import asyncio
 
 import pytest
 
 from app.routers.internal import verify_task_caller
+from app.services import tasks
+from app.services.tasks import InlineTaskQueue
 
 
 class RecordingQueue:
     def __init__(self):
         self.enqueued: list[tuple[str, dict]] = []
+        self.delays: list[int] = []  # parallel to `enqueued`
 
-    async def enqueue(self, name: str, payload: dict) -> None:
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: int = 0) -> None:
         self.enqueued.append((name, payload))
+        self.delays.append(delay_seconds)
 
     async def close(self) -> None:
         pass
@@ -57,3 +63,37 @@ async def test_unknown_task_is_404(cloud_h):
 
 async def test_internal_routes_not_mounted_with_inline_queue(h):
     assert (await h.client.post("/internal/tasks/generate_title", json={})).status_code == 404
+
+
+async def test_a_delayed_inline_task_runs_later_without_holding_up_drain(monkeypatch):
+    ran: list[str] = []
+
+    async def handler(ctx, payload):
+        ran.append(payload["n"])
+
+    monkeypatch.setitem(tasks.HANDLERS, "probe", handler)
+    queue = InlineTaskQueue(lambda: None)
+
+    await queue.enqueue("probe", {"n": "later"}, delay_seconds=0.05)
+    await queue.enqueue("probe", {"n": "now"})
+    await queue.drain()  # waits for immediate work only: a delay can be an hour
+    assert ran == ["now"]
+
+    await asyncio.sleep(0.1)
+    assert ran == ["now", "later"]
+
+
+async def test_closing_the_inline_queue_drops_delayed_tasks(monkeypatch):
+    ran: list[str] = []
+
+    async def handler(ctx, payload):
+        ran.append(payload["n"])
+
+    monkeypatch.setitem(tasks.HANDLERS, "probe", handler)
+    queue = InlineTaskQueue(lambda: None)
+
+    await queue.enqueue("probe", {"n": "later"}, delay_seconds=0.05)
+    await queue.close()  # shutdown must not wait out the delay
+    await asyncio.sleep(0.1)
+
+    assert ran == []

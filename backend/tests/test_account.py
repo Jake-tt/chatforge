@@ -231,7 +231,7 @@ async def test_guessing_the_password_through_delete_is_rate_limited(make_harness
 
 
 class FailingQueue(RecordingQueue):
-    async def enqueue(self, name: str, payload: dict) -> None:
+    async def enqueue(self, name: str, payload: dict, *, delay_seconds: float = 0) -> None:
         raise ConnectionError("task queue unavailable")
 
 
