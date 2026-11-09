@@ -12,7 +12,7 @@ Billing reads LangChain's standard `usage_metadata` and maps it onto `Usage`, wh
 """
 
 import logging
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Literal
 
 import httpx
@@ -39,6 +39,7 @@ from app.services.llm import (
     AUX_EFFORT,
     AUX_MAX_TOKENS,
     ChatTurn,
+    ImagePart,
     LLMError,
     TextResult,
     Usage,
@@ -199,7 +200,14 @@ def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
             # Per-request context (sources) rides on the current turn only; attachments on
             # every replay of their turn; the user's own words come last. See ChatTurn.
             text = "\n\n".join(p for p in (turn.context, turn.attachments, turn.content) if p)
-            messages.append(HumanMessage(body(text, breakpoint)))
+            if turn.images:
+                # Images first, then the text; a breakpoint goes on the last block.
+                blocks = [*(i.block() for i in turn.images), {"type": "text", "text": text}]
+                if breakpoint:
+                    blocks[-1] = blocks[-1] | {"cache_control": _CACHE}
+                messages.append(HumanMessage(blocks))
+            else:
+                messages.append(HumanMessage(body(text, breakpoint)))
         else:
             messages.append(AIMessage(body(turn.content, breakpoint)))
     return messages
@@ -250,9 +258,12 @@ class LangChainProvider:
         self._aux = aux
         self.structured_method = structured_method
 
-    async def complete(self, system: str, prompt: str) -> TextResult:
+    async def complete(self, system: str, prompt: str,
+                       images: Sequence[ImagePart] = ()) -> TextResult:
+        content = [*(i.block() for i in images), {"type": "text", "text": prompt}] \
+            if images else prompt
         try:
-            message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(prompt)])
+            message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(content)])
         except Exception as exc:
             raise LLMError(str(exc), retryable=is_retryable(exc)) from exc
         used = usage_from_message(message)

@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -29,10 +30,10 @@ from app.schemas import (
     MessageCreate,
 )
 from app.services import summary
-from app.services.attachments import render, store_upload, turn_order
+from app.services.attachments import images_for_turns, render, store_upload, turn_order
 from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
-from app.services.llm import ChatTurn, LLMError, Usage
+from app.services.llm import ChatTurn, ImagePart, LLMError, Usage
 from app.services.past_conversations import search_past_conversations
 from app.services.rag import PastSearch, account_snapshot, check_citations
 from app.services.recap import Recap, recap_for
@@ -154,8 +155,13 @@ async def upload_attachment(
                        headers={"Retry-After": "60"})
     # One byte over the limit is enough to refuse it without reading the rest.
     data = await file.read(ctx.settings.attachment_max_bytes + 1)
-    attachment = await store_upload(session, ctx.blobs, ctx.settings, conversation,
-                                    file.filename or "", data)
+    attachment, usage = await store_upload(session, ctx.blobs, ctx.llm, ctx.settings,
+                                           conversation, file.filename or "", data)
+    # Describing an image is work the user asked for: charged with the row it produced.
+    await ctx.quota.add_usage(session, principal.subject,
+                              usage.billed(ctx.settings.token_weights()))
+    await session.commit()
+    await ctx.quota.invalidate(principal.subject)
     return AttachmentUploaded(id=attachment.id, filename=attachment.filename,
                               kind=attachment.kind, chars=len(attachment.markdown))
 
@@ -216,7 +222,11 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
 
     recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
     boundary = summary.summarized_through(settings, conversation)
-    turns = _to_turns([e for e in recent if e.seq > boundary])
+    window = [e for e in recent if e.seq > boundary]
+    # Images go whole only with the latest few user turns; older ones by description.
+    recent_users = [e.seq for e in window if e.role == "user"][-settings.image_recent_turns:]
+    images = await images_for_turns(session, ctx.blobs, conversation.id, recent_users)
+    turns = _to_turns(window, images)
     after_clarify = _follows_clarify(recent, seq)
     is_first_message = seq == 1 and conversation.title is None
     system = summary.system_prompt(settings, conversation)
@@ -286,8 +296,11 @@ def _follows_clarify(recent: list[HistoryEntry], user_seq: int) -> bool:
                for e in recent)
 
 
-def _to_turns(entries: list[HistoryEntry]) -> list[ChatTurn]:
-    turns = [e.to_turn() for e in entries if e.content]
+def _to_turns(entries: list[HistoryEntry],
+              images: dict[int, tuple[ImagePart, ...]] | None = None) -> list[ChatTurn]:
+    images = images or {}
+    turns = [dataclasses.replace(e.to_turn(), images=images.get(e.seq, ()))
+             for e in entries if e.content]
     # The history window may start mid-exchange; the API requires a user turn first.
     while turns and turns[0].role != "user":
         turns.pop(0)

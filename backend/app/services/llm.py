@@ -8,7 +8,9 @@ deterministic `FakeProvider` for local runs without a model and for tests.
 
 from __future__ import annotations
 
+import base64
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -33,6 +35,9 @@ class ChatTurn:
     # Files attached to this turn, rendered as Markdown. Unlike `context` they are part of
     # the turn: stored with it and replayed, byte for byte, on every later request.
     attachments: str = ""
+    # Images attached to this turn, sent whole while the turn is among the latest few;
+    # their description in `attachments` stands in for them after that.
+    images: tuple[ImagePart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -84,8 +89,22 @@ class LLMError(Exception):
         self.usage = usage or Usage()  # tokens spent before the failure, still billable
 
 
+@dataclass(frozen=True)
+class ImagePart:
+    """An image sent to the model with a message (vision models only)."""
+
+    mime: str
+    data: bytes
+
+    def block(self) -> dict:
+        """LangChain's standard image content block; each chat model maps it to its API."""
+        return {"type": "image", "base64": base64.b64encode(self.data).decode(),
+                "mime_type": self.mime}
+
+
 class LLMProvider(Protocol):
-    async def complete(self, system: str, prompt: str) -> TextResult: ...
+    async def complete(self, system: str, prompt: str,
+                       images: Sequence[ImagePart] = ()) -> TextResult: ...
 
     async def structured[M: BaseModel](
         self, system: str, prompt: str, schema: type[M]
@@ -97,7 +116,11 @@ class LLMProvider(Protocol):
 class FakeProvider:
     """Deterministic aux calls. Token counts are word counts so tests can assert on them."""
 
-    async def complete(self, system: str, prompt: str) -> TextResult:
+    async def complete(self, system: str, prompt: str,
+                       images: Sequence[ImagePart] = ()) -> TextResult:
+        if images:
+            described = ", ".join(f"{i.mime} {len(i.data)} bytes" for i in images)
+            return TextResult(f"(fake) image: {described}", Usage(1000 * len(images), 30))
         words = prompt.split()
         return TextResult(" ".join(words[-6:]), Usage(len(words), min(len(words), 6)))
 

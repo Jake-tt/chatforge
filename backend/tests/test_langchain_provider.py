@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.services.chat_models import LangChainProvider, to_messages
-from app.services.llm import ChatTurn, LLMError, Usage, build_provider
+from app.services.llm import ChatTurn, ImagePart, LLMError, Usage, build_provider
 from tests.fakes import ScriptedChatModel, structured, usage
 
 
@@ -29,6 +29,29 @@ async def test_complete_returns_text_and_usage_from_the_aux_model():
     result = await provider.complete("title it", "plan a trip")
 
     assert (result.text, result.usage) == ("a short title", Usage(30, 3))
+
+
+async def test_complete_sends_images_ahead_of_the_prompt():
+    aux = ScriptedChatModel(script=[AIMessage("a red square", usage_metadata=usage(900, 4))])
+    provider = LangChainProvider(aux)
+
+    await provider.complete("describe", "what is it?", [ImagePart("image/png", b"PNGDATA")])
+
+    content = aux.calls[0]["messages"][1].content
+    assert content[0] == {"type": "image", "base64": "UE5HREFUQQ==", "mime_type": "image/png"}
+    assert content[1] == {"type": "text", "text": "what is it?"}
+
+
+def test_an_image_turn_keeps_its_cache_breakpoint_on_the_text():
+    image = ImagePart("image/png", b"PNGDATA")
+    # The image turn is the one before the current turn, so it carries the breakpoint.
+    turns = [ChatTurn("user", "q1", images=(image,)), ChatTurn("user", "q2")]
+
+    first = to_messages("sys", turns, cache=True)[1].content
+
+    # A breakpoint marks the end of the turn: its last (text) block, not the image.
+    assert first[0]["type"] == "image" and "cache_control" not in first[0]
+    assert first[-1]["text"] == "q1" and "cache_control" in first[-1]
 
 
 class Decision(BaseModel):

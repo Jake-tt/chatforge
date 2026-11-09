@@ -172,7 +172,7 @@ flowchart TB
 | GET / POST | `/conversations` | 목록(최근 활동순) / 생성 |
 | GET / DELETE | `/conversations/{id}` | 상세(메시지 포함) / 소프트 삭제 |
 | GET | `/conversations/{id}/recap` | 오래 쉰 대화를 다시 열 때의 recap. 해당 없으면 204 |
-| POST | `/conversations/{id}/attachments` | 문서 업로드(multipart) → 마크다운 변환·저장. 다음 메시지의 `attachment_ids`로 보냄 |
+| POST | `/conversations/{id}/attachments` | 문서·이미지 업로드(multipart) → 마크다운 변환(이미지는 비전 모델 설명)·저장. 다음 메시지의 `attachment_ids`로 보냄 |
 | DELETE | `/conversations` | 전체 소프트 삭제 |
 | POST | `/conversations/{id}/messages` | **메시지 전송 → SSE 스트림** |
 | GET | `/usage` | 오늘 사용량·한도 |

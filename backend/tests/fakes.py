@@ -104,7 +104,9 @@ def structured(**fields) -> Callable[[list[BaseMessage], list[dict]], AIMessage]
 
 def _text(message: BaseMessage) -> str:
     content = message.content
-    return content if isinstance(content, str) else "".join(b["text"] for b in content)
+    # Text blocks only: an image block has no text.
+    return content if isinstance(content, str) else \
+        "".join(b["text"] for b in content if b.get("type") == "text")
 
 
 class RecordingChatModel(ScriptedChatModel):

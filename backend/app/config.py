@@ -87,6 +87,14 @@ class Settings(BaseSettings):
     # Longer documents are cut and the cut is stated.
     attachment_inline_chars: int = 6_000
     uploads_per_minute: int = 20  # converting a file costs CPU
+    # Images need a vision model. None: decided by the provider (Claude has vision; the
+    # local model doesn't). Set to force it, e.g. in tests.
+    vision_enabled: bool | None = None
+    image_max_side: int = 1568  # longer images are scaled down: same detail, fewer tokens
+    image_max_pixels: int = 40_000_000  # refuse decompression bombs before decoding
+    image_recent_turns: int = 3  # images sent whole for the latest N user turns
+    image_description_timeout_seconds: float = 30.0  # per image or scanned page
+    ocr_max_pages: int = 10  # a scanned PDF is read this far; the rest is said to be unread
 
     # Recap shown on reopening a conversation that has been quiet this long.
     recap_after_seconds: int = Field(default=3600, ge=0)
@@ -187,6 +195,12 @@ class Settings(BaseSettings):
             "free": self.free_daily_tokens,
             "pro": self.pro_daily_tokens,
         }[plan]
+
+    @property
+    def supports_vision(self) -> bool:
+        if self.vision_enabled is not None:
+            return self.vision_enabled
+        return self.llm_provider == "anthropic"
 
     def daily_web_searches(self, plan: str) -> int:
         return {
