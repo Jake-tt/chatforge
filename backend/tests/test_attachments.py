@@ -14,16 +14,18 @@ from app.services import attachments
 from tests.fakes import RecordingChatModel, ScriptedChatModel
 
 
-def _pdf(text: str | None) -> bytes:
-    """A one-page PDF with `text` drawn in Helvetica, or a page with no text at all."""
+def _pdf(text: str | None, pages: int = 1) -> bytes:
+    """A PDF whose pages draw `text` in Helvetica, or pages with no text (like a scan)."""
     stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode() if text else b""
+    # 1 catalog, 2 pages, 3 font, 4 contents, then one page object per page.
+    kids = " ".join(f"{5 + i} 0 R" for i in range(pages)).encode()
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
-        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        b"<< /Type /Pages /Kids [" + kids + b"] /Count %d >>" % pages,
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+        *[b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+          b"/Resources << /Font << /F1 3 0 R >> >> >>"] * pages,
     ]
     out, offsets = io.BytesIO(), []
     out.write(b"%PDF-1.4\n")
@@ -346,3 +348,56 @@ async def test_a_file_that_only_looks_like_an_image_is_refused(setup):
     fake = await _upload(h, headers, cid, "x.png", b"\x89PNG\r\n\x1a\n" + b"junk" * 10)
 
     assert (fake.status_code, fake.json()["detail"]["code"]) == (422, "unreadable_file")
+
+
+
+# --- scanned PDFs: read page by page by a vision model --------------------------------
+
+async def test_a_scanned_pdf_is_read_page_by_page_by_a_vision_model(setup):
+    h, model, headers, cid = await setup(vision_enabled=True)
+    used = (await h.client.get("/usage", headers=headers)).json()["used"]
+
+    up = await _upload(h, headers, cid, "scan.pdf", _pdf(None, pages=2))
+
+    assert up.status_code == 201 and up.json()["kind"] == "document"
+    await _send(h, headers, cid, "요약해줘", [up.json()["id"]])
+    sent = model.current_turns[-1]
+    assert "## Page 1" in sent and "## Page 2" in sent and "(fake) image: image/jpeg" in sent
+    # Reading the pages is work the user asked for by uploading: charged.
+    assert (await h.client.get("/usage", headers=headers)).json()["used"] > used
+
+
+async def test_only_the_first_pages_of_a_long_scan_are_read(setup):
+    h, model, headers, cid = await setup(vision_enabled=True, ocr_max_pages=2)
+
+    up = await _upload(h, headers, cid, "scan.pdf", _pdf(None, pages=5))
+    await _send(h, headers, cid, "요약해줘", [up.json()["id"]])
+
+    sent = model.current_turns[-1]
+    assert "## Page 2" in sent and "## Page 3" not in sent
+    assert "pages 3-5 were not read" in sent
+
+
+async def test_a_single_unread_page_is_named_as_one(setup):
+    h, model, headers, cid = await setup(vision_enabled=True, ocr_max_pages=2)
+
+    up = await _upload(h, headers, cid, "scan.pdf", _pdf(None, pages=3))
+    await _send(h, headers, cid, "요약해줘", [up.json()["id"]])
+
+    assert "(page 3 was not read)" in model.current_turns[-1]
+
+
+async def test_a_pdf_with_text_is_not_sent_to_the_vision_model(setup, monkeypatch):
+    seen: list[int] = []
+    original = attachments.render_pages
+
+    def counting(data: bytes, settings, limit: int):
+        seen.append(limit)
+        return original(data, settings, limit)
+
+    monkeypatch.setattr(attachments, "render_pages", counting)
+    h, model, headers, cid = await setup(vision_enabled=True)
+
+    up = await _upload(h, headers, cid, "report.pdf", _pdf("Quarterly revenue grew 12%"))
+
+    assert up.status_code == 201 and seen == []

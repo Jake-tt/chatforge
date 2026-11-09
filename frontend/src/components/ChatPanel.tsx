@@ -33,7 +33,7 @@ const ERROR_TEXT: Record<string, string> = {
   file_too_large: "파일이 너무 커요. 10MB 이하로 올려 주세요.",
   unsupported_file: "이 형식의 파일은 올릴 수 없어요. PDF, Word, Excel, PowerPoint, 텍스트, 이미지 파일을 올려 주세요.",
   images_not_supported: "지금 모델은 이미지를 읽지 못해요. 문서 파일을 올려 주세요.",
-  no_text: "파일에서 글자를 읽지 못했어요. 스캔한 문서는 아직 지원하지 않아요.",
+  no_text: "파일에서 글자를 읽지 못했어요. 스캔한 문서는 이미지를 읽을 수 있는 모델에서만 읽어요.",
   unreadable_file: "파일을 읽지 못했어요. 손상되지 않았는지 확인해 주세요.",
   invalid_attachment: "첨부한 파일을 찾지 못했어요. 다시 올려 주세요.",
 };
