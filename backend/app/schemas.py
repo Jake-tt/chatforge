@@ -83,8 +83,10 @@ class AttachmentOut(BaseModel):
     kind: str
 
 
-class AttachmentUploaded(AttachmentOut):
-    chars: int  # length of the Markdown it became
+class AttachmentStatusOut(AttachmentOut):
+    status: str  # "processing" until converted in the background, then "ready" or "failed"
+    chars: int | None = None  # length of the Markdown it became, once ready
+    error_code: str | None = None  # why it failed: the same codes an upload is refused with
 
 
 class MessageOut(BaseModel):
