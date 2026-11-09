@@ -33,6 +33,8 @@ dependencies = [
     "python-multipart>=0.0.32",
     # Image attachments are decoded, scaled down and re-encoded without metadata.
     "pillow>=11.0",
+    # Scanned PDF pages rendered to images for a vision model to read.
+    "pypdfium2>=5.14",
 ]
 
 [project.optional-dependencies]

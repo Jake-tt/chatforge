@@ -93,7 +93,8 @@ class Settings(BaseSettings):
     image_max_side: int = 1568  # longer images are scaled down: same detail, fewer tokens
     image_max_pixels: int = 40_000_000  # refuse decompression bombs before decoding
     image_recent_turns: int = 3  # images sent whole for the latest N user turns
-    image_description_timeout_seconds: float = 30.0
+    image_description_timeout_seconds: float = 30.0  # per image or scanned page
+    ocr_max_pages: int = 10  # a scanned PDF is read this far; the rest is said to be unread
 
     # Recap shown on reopening a conversation that has been quiet this long.
     recap_after_seconds: int = Field(default=3600, ge=0)
