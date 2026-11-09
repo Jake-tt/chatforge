@@ -87,6 +87,17 @@ body { background: var(--bg); color: var(--text); }
 .bubble.assistant { align-self: flex-start; background: var(--assistant-bubble); border: 1px solid var(--border); }
 .note { margin-top: 6px; font-size: 12px; color: var(--muted); }
 
+.pending-files, .attached-files { display: flex; flex-wrap: wrap; gap: 6px; }
+.pending-files { padding: 0 16px; }
+.attached-files { margin-top: 6px; }
+.file {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 12px;
+}
+.bubble.user .file { background: transparent; color: inherit; border-color: currentColor; }
+.file.muted { color: var(--muted); }
+.file-remove { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 2px; font: inherit; }
+
 .recap {
   align-self: stretch; padding: 12px 14px; border-radius: 12px;
   border: 1px dashed var(--border); background: var(--panel);

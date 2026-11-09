@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, Citation, Recap } from "../api";
+import { api, ApiError, AttachmentRef, Citation, Recap } from "../api";
 import { chipsFor, composerHint } from "../chips";
 import Markdown from "./Markdown";
 import { markCited, shownSources } from "../sources";
@@ -13,6 +13,7 @@ interface Bubble {
   citations?: Citation[] | null;
   suggestions?: string[];
   options?: string[] | null; // set on a clarifying question
+  attachments?: AttachmentRef[];
 }
 
 interface Props {
@@ -29,7 +30,16 @@ const ERROR_TEXT: Record<string, string> = {
   llm_unavailable: "모델 응답이 중간에 끊겼어요. 다시 시도해 주세요.",
   stream_in_progress: "이 대화에서 아직 답변을 작성하고 있어요. 끝난 뒤 다시 보내 주세요.",
   too_many_streams: "동시에 진행 중인 답변이 너무 많아요. 잠시 후 다시 보내 주세요.",
+  file_too_large: "파일이 너무 커요. 10MB 이하로 올려 주세요.",
+  unsupported_file: "이 형식의 파일은 올릴 수 없어요. PDF, Word, Excel, PowerPoint, 텍스트 파일을 올려 주세요.",
+  images_not_supported: "이미지는 아직 올릴 수 없어요.",
+  no_text: "파일에서 글자를 읽지 못했어요. 스캔한 문서는 아직 지원하지 않아요.",
+  unreadable_file: "파일을 읽지 못했어요. 손상되지 않았는지 확인해 주세요.",
+  invalid_attachment: "첨부한 파일을 찾지 못했어요. 다시 올려 주세요.",
 };
+
+// What the file picker offers; the server checks the bytes either way.
+const ACCEPT = ".pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.json,.html";
 
 export default function ChatPanel(props: Props) {
   const [bubbles, setBubbles] = useState<Bubble[]>([]);
@@ -37,6 +47,9 @@ export default function ChatPanel(props: Props) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [recap, setRecap] = useState<Recap | null>(null);
+  const [attached, setAttached] = useState<AttachmentRef[]>([]); // uploaded, not yet sent
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // History is loaded once per mount; the parent remounts on navigation (see App panelKey).
@@ -67,17 +80,45 @@ export default function ChatPanel(props: Props) {
   const updateLast = (fn: (b: Bubble) => Bubble) =>
     setBubbles((prev) => [...prev.slice(0, -1), fn(prev[prev.length - 1])]);
 
+  const reportError = (err: unknown) => {
+    const apiErr = err instanceof ApiError ? err : null;
+    setError({
+      code: apiErr?.code ?? "unknown",
+      message: (apiErr && ERROR_TEXT[apiErr.code]) ?? apiErr?.message ?? "문제가 발생했어요.",
+    });
+  };
+
+  const upload = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    setError(null);
+    try {
+      const conversationId = await props.ensureConversation();
+      for (const file of Array.from(files)) {
+        const ref = await api.uploadAttachment(conversationId, file);
+        setAttached((prev) => [...prev, ref]);
+      }
+    } catch (err) {
+      reportError(err);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = ""; // the same file can be picked again
+    }
+  };
+
   const send = async (text: string) => {
     const content = text.trim();
-    if (!content || streaming) return;
+    if (!content || streaming || uploading) return;
+    const files = attached;
 
     setInput("");
+    setAttached([]);
     setError(null);
     setRecap(null); // picked back up: it has done its job
     setStreaming(true);
     setBubbles((prev) => [
       ...prev,
-      { id: `u-${Date.now()}`, role: "user", content },
+      { id: `u-${Date.now()}`, role: "user", content, attachments: files },
       { id: `a-${Date.now()}`, role: "assistant", content: "", pending: true },
     ]);
 
@@ -99,6 +140,7 @@ export default function ChatPanel(props: Props) {
           onClarify: (options) => updateLast((b) => ({ ...b, options })),
         },
         controller.signal,
+        files.map((f) => f.id),
       );
       updateLast((b) => ({
         ...b,
@@ -117,13 +159,11 @@ export default function ChatPanel(props: Props) {
         setBubbles((prev) => prev.slice(0, -2));
         // Keep anything typed meanwhile; otherwise offer the question again.
         setInput((current) => (current.trim() ? current : content));
+        // The server freed the files too, so they go back with the question.
+        setAttached((current) => (current.length ? current : files));
       }
       if (controller.signal.aborted) return;
-      const apiErr = err instanceof ApiError ? err : null;
-      setError({
-        code: apiErr?.code ?? "unknown",
-        message: (apiErr && ERROR_TEXT[apiErr.code]) ?? apiErr?.message ?? "문제가 발생했어요.",
-      });
+      reportError(err);
     } finally {
       setStreaming(false);
       abortRef.current = null;
@@ -167,6 +207,15 @@ export default function ChatPanel(props: Props) {
             ) : b.pending ? (
               <span className="typing">●●●</span>
             ) : null}
+            {b.attachments && b.attachments.length > 0 && (
+              <div className="attached-files">
+                {b.attachments.map((a) => (
+                  <span key={a.id} className="file">
+                    📎 {a.filename}
+                  </span>
+                ))}
+              </div>
+            )}
             {b.note && <div className="note">{b.note}</div>}
             {b.citations && b.citations.length > 0 && (
               <ol className="sources" aria-label="참고한 자료">
@@ -195,6 +244,25 @@ export default function ChatPanel(props: Props) {
         </div>
       )}
 
+      {(attached.length > 0 || uploading) && (
+        <div className="pending-files" aria-label="보낼 첨부 파일">
+          {attached.map((a) => (
+            <span key={a.id} className="file">
+              📎 {a.filename}
+              <button
+                type="button"
+                className="file-remove"
+                aria-label={`${a.filename} 빼기`}
+                onClick={() => setAttached((prev) => prev.filter((p) => p.id !== a.id))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+          {uploading && <span className="file muted">올리는 중…</span>}
+        </div>
+      )}
+
       <form
         className="composer"
         onSubmit={(e: FormEvent) => {
@@ -202,6 +270,23 @@ export default function ChatPanel(props: Props) {
           void send(input);
         }}
       >
+        <input
+          ref={fileRef}
+          type="file"
+          accept={ACCEPT}
+          multiple
+          hidden
+          onChange={(e) => void upload(e.target.files)}
+        />
+        <button
+          type="button"
+          className="btn"
+          aria-label="파일 첨부"
+          disabled={streaming || uploading || attached.length >= 4}
+          onClick={() => fileRef.current?.click()}
+        >
+          📎
+        </button>
         <textarea
           value={input}
           placeholder={streaming ? composerHint(undefined) : composerHint(bubbles[bubbles.length - 1])}
@@ -220,7 +305,7 @@ export default function ChatPanel(props: Props) {
             중지
           </button>
         ) : (
-          <button type="submit" className="btn btn-primary" disabled={!input.trim()}>
+          <button type="submit" className="btn btn-primary" disabled={!input.trim() || uploading}>
             보내기
           </button>
         )}

@@ -22,6 +22,12 @@ export interface Citation {
   snippet: string;
   cited?: boolean; // whether the answer cites it; absent until the answer is checked
 }
+// A file uploaded into a conversation, sent with the next message.
+export interface AttachmentRef {
+  id: string;
+  filename: string;
+  kind: string;
+}
 // Shown on returning to a conversation left quiet for a while.
 export interface Recap {
   recap: string;
@@ -37,6 +43,7 @@ export interface Message {
   input_tokens: number;
   output_tokens: number;
   citations: Citation[] | null;
+  attachments: AttachmentRef[];
   created_at: string;
 }
 export interface Usage {
@@ -123,7 +130,8 @@ async function authedFetch(path: string, init: RequestInit = {}, retry = true): 
   const res = await fetch(`${BASE}${path}`, {
     ...init,
     headers: {
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      // JSON bodies only: for a FormData upload the browser sets the multipart boundary.
+      ...(typeof init.body === "string" ? { "Content-Type": "application/json" } : {}),
       ...init.headers,
       Authorization: `Bearer ${memoryToken}`,
     },
@@ -149,6 +157,14 @@ export const api = {
   getRecap: async (id: string): Promise<Recap | null> => {
     const res = await authedFetch(`/conversations/${id}/recap`);
     return res.status === 204 ? null : res.json();
+  },
+  uploadAttachment: (conversationId: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return json<AttachmentRef>(`/conversations/${conversationId}/attachments`, {
+      method: "POST",
+      body: form,
+    });
   },
   createConversation: () =>
     json<Conversation>("/conversations", { method: "POST", body: "{}" }),
@@ -196,10 +212,11 @@ export const api = {
     content: string,
     handlers: StreamHandlers,
     signal?: AbortSignal,
+    attachmentIds: string[] = [],
   ): Promise<StreamDone> {
     const res = await authedFetch(`/conversations/${conversationId}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, attachment_ids: attachmentIds }),
       signal,
     });
     const reader = res.body!.getReader();
