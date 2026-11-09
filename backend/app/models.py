@@ -4,6 +4,7 @@ from datetime import UTC, date, datetime
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -15,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -41,6 +43,8 @@ class User(Base):
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Set when the account is deleted; its data is purged by a background task.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The user's choice to let the assistant remember things across conversations.
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true())
 
 
 class Guest(Base):
@@ -162,6 +166,60 @@ class Attachment(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
+
+
+class MemoryEntity(Base):
+    """Something a member's memory is about: themselves, a person, a place, a thing."""
+
+    __tablename__ = "memory_entities"
+    __table_args__ = (
+        # One entity per name per user; `key` is the name normalized for matching.
+        UniqueConstraint("user_id", "key", name="uq_memory_entities_user_id_key"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(200))
+    key: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+
+
+class MemoryFact(Base):
+    """One edge of the graph: subject -predicate-> object entity, or a plain value."""
+
+    __tablename__ = "memory_facts"
+    __table_args__ = (
+        Index("ix_memory_facts_user_id", "user_id"),
+        Index("ix_memory_facts_subject_id", "subject_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    subject_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memory_entities.id", ondelete="CASCADE"))
+    predicate: Mapped[str] = mapped_column(String(100))
+    object_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("memory_entities.id", ondelete="CASCADE"))
+    value: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
+
+
+class MemoryFactSource(Base):
+    """A conversation a fact came from. A fact with no sources left is forgotten."""
+
+    __tablename__ = "memory_fact_sources"
+
+    fact_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("memory_facts.id", ondelete="CASCADE"), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True)
 
 
 class UsageDaily(Base):
