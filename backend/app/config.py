@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # Longer documents are cut and the cut is stated.
     attachment_inline_chars: int = 6_000
     uploads_per_minute: int = 20  # converting a file costs CPU
+    # Parsing runs in a child process that is killed past the timeout (see run_isolated).
+    convert_timeout_seconds: float = 20.0
+    convert_concurrency: int = Field(default=2, ge=1)  # child processes at once, per instance
+    convert_memory_mb: int = 2048  # address-space cap for a child (Linux; macOS ignores it)
     # Images need a vision model. None: decided by the provider (Claude has vision; the
     # local model doesn't). Set to force it, e.g. in tests.
     vision_enabled: bool | None = None
