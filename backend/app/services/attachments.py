@@ -35,23 +35,26 @@ import json
 import logging
 import os
 import sys
+import uuid
 import weakref
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
+from app.services.claim import guest_subject, user_subject
 from app.services.convert import MAX_MARKDOWN_CHARS
 from app.services.llm import ImagePart, LLMProvider, Usage
 from app.services.search import BM25Search, Document, SearchHit
 
 if TYPE_CHECKING:
     from app.config import Settings
+    from app.context import AppContext
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +70,8 @@ _OFFICE_PARTS = {
                                       "presentationml.presentation"),
 }
 _IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+
+TASK_NAME = "convert_attachment"
 
 OCR_SYSTEM = (
     "This is one page of a scanned document. Transcribe all of its text in Markdown, in "
@@ -257,13 +262,77 @@ class LocalBlobStore:
         tmp.replace(path)  # atomic: a reader never sees half a file
 
 
-async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider,
-                       settings: Settings, conversation: Conversation, filename: str,
-                       data: bytes) -> tuple[Attachment, Usage]:
-    """Add the attachment to the session (the caller commits it with any usage charged)."""
+async def accept_upload(session: AsyncSession, settings: Settings,
+                        conversation: Conversation, filename: str, data: bytes) -> Attachment:
+    """Take an upload: the checks that are quick happen here, the conversion later.
+
+    Size, type, zip bombs and an empty file are refused at once. A file already converted
+    (same bytes) is reused and ready now; otherwise the row waits in "processing" with the
+    bytes, for `convert_attachment`. The caller commits, then enqueues the task.
+    """
     filename = Path(filename or "file").name[:255] or "file"
     if len(data) > settings.attachment_max_bytes:
         raise ApiError(413, "file_too_large", "This file is too large to attach")
+    if not data.strip():
+        raise ApiError(422, "no_text", "No text could be read from this file")
+    file_type = detect(data, filename, settings)
+    source = hashlib.sha256(data).hexdigest()
+    done = await session.scalar(select(Attachment).where(
+        Attachment.source_sha256 == source, Attachment.status == "ready").limit(1))
+    if done is not None:
+        attachment = Attachment(conversation_id=conversation.id, kind=done.kind, mime=done.mime,
+                                filename=filename, size=done.size, source_sha256=source,
+                                sha256=done.sha256, markdown=done.markdown, status="ready")
+    else:
+        attachment = Attachment(conversation_id=conversation.id, kind=file_type.kind,
+                                mime=file_type.mime, filename=filename, size=len(data),
+                                source_sha256=source, status="processing", pending_data=data)
+    session.add(attachment)
+    return attachment
+
+
+async def convert_attachment(ctx: AppContext, payload: dict) -> None:
+    """Task: convert one uploaded file. Safe to deliver twice (only "processing" moves on).
+
+    Describing an image or reading a scan is work the user asked for by uploading: its
+    tokens are charged to the conversation's owner with the row they produced.
+    """
+    attachment_id = uuid.UUID(payload["attachment_id"])
+    async with ctx.sessionmaker() as session:
+        row = await session.get(Attachment, attachment_id)
+        if row is None or row.status != "processing" or row.pending_data is None:
+            return
+        conversation = await session.get(Conversation, row.conversation_id)
+        data, filename = row.pending_data, row.filename
+    subject = user_subject(conversation.user_id) if conversation.user_id else \
+        guest_subject(conversation.guest_id)
+
+    try:
+        markdown, stored, mime, usage = await _convert(ctx, filename, data)
+        values = {"status": "ready", "markdown": markdown, "sha256": hashlib.sha256(stored)
+                  .hexdigest(), "mime": mime, "size": len(stored), "pending_data": None}
+    except ApiError as exc:
+        usage = Usage()
+        values = {"status": "failed", "error_code": exc.detail["code"], "pending_data": None}
+    async with ctx.sessionmaker() as session:
+        applied = await session.execute(
+            update(Attachment)
+            .where(Attachment.id == attachment_id, Attachment.status == "processing")
+            .values(**values))
+        if applied.rowcount != 1:
+            await session.rollback()
+            return  # another delivery got there first
+        await ctx.quota.add_usage(session, subject, usage.billed(ctx.settings.token_weights()))
+        await session.commit()
+    await ctx.quota.invalidate(subject)
+    log.info("attachment converted", extra={"attachment_id": str(attachment_id),
+                                            "status": values["status"]})
+
+
+async def _convert(ctx: AppContext, filename: str,
+                   data: bytes) -> tuple[str, bytes, str, Usage]:
+    """Markdown for the file, the bytes to store, their type, and the tokens it took."""
+    settings, llm = ctx.settings, ctx.llm
     file_type = detect(data, filename, settings)
     mime = file_type.mime
     if file_type.kind == "image":
@@ -279,14 +348,11 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
         if "data" not in result:
             raise ApiError(422, "unreadable_file", "This file couldn't be read")
         data, mime = base64.b64decode(result["data"]), result["mime"]
-    digest = hashlib.sha256(data).hexdigest()
 
     usage = Usage()
-    markdown = await session.scalar(
-        select(Attachment.markdown).where(Attachment.sha256 == digest).limit(1))
-    if markdown is None and file_type.kind == "image":
+    if file_type.kind == "image":
         markdown, usage = await _describe(llm, settings, ImagePart(mime, data))
-    elif markdown is None:
+    else:
         try:
             result = await run_isolated("markdown", {"extension": file_type.extension}, data,
                                         settings)
@@ -302,13 +368,8 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
     if not markdown:
         # A scan lands here when the model can't read images.
         raise ApiError(422, "no_text", "No text could be read from this file")
-
-    await blobs.put(digest, data)
-    attachment = Attachment(conversation_id=conversation.id, kind=file_type.kind, mime=mime,
-                            filename=filename, size=len(data), sha256=digest,
-                            markdown=markdown)
-    session.add(attachment)
-    return attachment, usage
+    await ctx.blobs.put(hashlib.sha256(data).hexdigest(), data)
+    return markdown, data, mime, usage
 
 
 async def _describe(llm: LLMProvider, settings: Settings, image: ImagePart) -> tuple[str, Usage]:
