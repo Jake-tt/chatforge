@@ -16,7 +16,7 @@ from app.config import Settings, get_settings
 from app.context import AppContext
 from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
-from app.routers import auth, conversations, internal, payments, usage
+from app.routers import auth, conversations, internal, memory, payments, usage
 from app.routers.conversations import drain_unfinished_writes
 from app.services.attachments import LocalBlobStore
 from app.services.chat_models import build_chat_model, warm_up_ollama
@@ -131,6 +131,7 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(conversations.router)
     app.include_router(usage.router)
+    app.include_router(memory.router)
     if settings.task_backend == "cloudtasks":
         app.include_router(internal.router)
     if settings.payment_webhook_secret:

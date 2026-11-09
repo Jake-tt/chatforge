@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import delete, select
 
 from app.models import Conversation, Guest, Message, UsageDaily, User
+from app.services import memory
 from app.services.claim import user_subject
 
 if TYPE_CHECKING:
@@ -50,6 +51,8 @@ async def purge_user(ctx: AppContext, payload: dict) -> None:
             await session.execute(delete(UsageDaily).where(UsageDaily.subject == subject))
             # Claimed guests are empty shells whose chats moved to this user.
             await session.execute(delete(Guest).where(Guest.claimed_by_user_id == user_id))
+            # Explicitly: SQLite doesn't enforce the cascade from users.
+            await memory.delete_all(session, user_id)
             await session.execute(delete(User).where(User.id == user_id,
                                                      User.deleted_at.is_not(None)))
             await session.commit()

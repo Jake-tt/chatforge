@@ -29,7 +29,7 @@ from app.schemas import (
     ConversationOut,
     MessageCreate,
 )
-from app.services import summary
+from app.services import memory, summary
 from app.services.attachments import (
     has_cut_documents,
     images_for_turns,
@@ -126,6 +126,8 @@ async def delete_conversation(
 ) -> Response:
     conversation = await _get_owned(session, principal, conversation_id)
     conversation.deleted_at = datetime.now(UTC)
+    # What was remembered only from this conversation goes with it.
+    await memory.forget_conversations(session, [conversation.id])
     await session.commit()
     await ctx.history.invalidate(principal.subject, conversation.id)
     return Response(status_code=204)
@@ -137,9 +139,11 @@ async def delete_all_conversations(
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
 ) -> BulkDeleteOut:
+    ids = list(await session.scalars(select(Conversation.id).where(_owned_by(principal))))
     result = await session.execute(
         update(Conversation).where(_owned_by(principal)).values(deleted_at=datetime.now(UTC))
     )
+    await memory.forget_conversations(session, ids)
     await session.commit()
     # Pattern delete over this owner's cache keys, via SCAN (never KEYS).
     await ctx.history.invalidate_owner(principal.subject)

@@ -107,6 +107,23 @@ class ConversationDetail(ConversationOut):
     messages: list[MessageOut]
 
 
+class MemoryFactOut(BaseModel):
+    id: uuid.UUID
+    subject: str
+    predicate: str
+    object: str  # an entity's name or a plain value
+    updated_at: datetime
+
+
+class MemoryOut(BaseModel):
+    enabled: bool
+    facts: list[MemoryFactOut]
+
+
+class MemorySettings(BaseModel):
+    enabled: bool
+
+
 class BulkDeleteOut(BaseModel):
     deleted: int
 

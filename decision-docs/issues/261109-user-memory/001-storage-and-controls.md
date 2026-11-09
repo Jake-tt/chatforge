@@ -19,11 +19,11 @@ DEC-BACKEND-ACCOUNT-DELETION-001, DEC-BACKEND-OWNERSHIP-001, spec guest-to-membe
 - 탈퇴 정리 작업이 기억 전체를 지운다
 
 ## Acceptance Criteria
-- [ ] 회원은 자기 기억만 보고 지운다(남의 사실 ID는 404)
-- [ ] 끄면 `enabled=false`가 저장되고 기존 사실은 남는다
-- [ ] 대화를 지우면 그 대화에서만 나온 사실이 지워지고, 다른 출처가 있는 사실은 남는다
-- [ ] 탈퇴 정리 후 기억 행이 남지 않는다
-- [ ] 마이그레이션 upgrade/check/downgrade 왕복, Postgres 실행
+- [x] 회원은 자기 기억만 보고 지운다(남의 사실 ID는 404)
+- [x] 끄면 `enabled=false`가 저장되고 기존 사실은 남는다
+- [x] 대화를 지우면 그 대화에서만 나온 사실이 지워지고, 다른 출처가 있는 사실은 남는다
+- [x] 탈퇴 정리 후 기억 행이 남지 않는다
+- [x] 마이그레이션 upgrade/check/downgrade 왕복, Postgres 실행
 
 ## Verification
 - Package: Strict Regression Net
