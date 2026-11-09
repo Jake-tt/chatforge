@@ -204,6 +204,9 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     message = Message(id=uuid.uuid4(), conversation_id=conversation.id, seq=seq, role="user",
                       content=body.content)
     session.add(message)
+    # The message row first: nothing tells the unit of work to order these two (the
+    # relationship is view-only), and Postgres checks the foreign key on each statement.
+    await session.flush()
     for attachment in attached:
         attachment.message_id = message.id
     await session.commit()
