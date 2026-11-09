@@ -8,7 +8,10 @@ holding a thread and a CPU in the server.
 
 from __future__ import annotations
 
+import base64
 import io
+import json
+import sys
 
 MAX_MARKDOWN_CHARS = 200_000  # stored; what the model sees is cut far shorter
 
@@ -74,3 +77,37 @@ def render_pages(data: bytes, max_side: int, limit: int) -> tuple[list[bytes], i
         return pages, len(pdf)
     finally:
         pdf.close()
+
+
+# --- worker: `python -m app.services.convert <op> <json params>`, file bytes on stdin ---
+
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
+
+
+def run(op: str, params: dict, data: bytes) -> dict:
+    """One conversion, as the JSON the worker prints. Format problems are results, not
+    crashes: the caller tells the user, while a crash is logged as ours."""
+    try:
+        if op == "markdown":
+            return {"markdown": to_markdown(data, params["extension"])}
+        if op == "image":
+            image, mime = prepare_image(data, params["max_side"], params["max_pixels"])
+            return {"data": _b64(image), "mime": mime}
+        if op == "pages":
+            pages, total = render_pages(data, params["max_side"], params["limit"])
+            return {"pages": [_b64(p) for p in pages], "total": total}
+    except TooLarge:
+        return {"error": "too_large"}
+    except Unreadable:
+        return {"error": "unreadable"}
+    raise ValueError(f"unknown conversion {op!r}")
+
+
+def main(argv: list[str]) -> None:
+    result = run(argv[1], json.loads(argv[2]), sys.stdin.buffer.read())
+    sys.stdout.write(json.dumps(result))
+
+
+if __name__ == "__main__":
+    main(sys.argv)

@@ -16,17 +16,26 @@ A document longer than what fits on a turn is cut there, and the agent gets a
 `search_attachments` tool that finds the rest: the conversation's cut documents, split into
 passages and searched with the same BM25 as the help center (`search_attachments`).
 
-Everything uploaded is untrusted: the type comes from the bytes, not the name; zip-based
-formats are checked for their unpacked size before a parser opens them; and the text is
-handed to the model as material, never instructions.
+Everything uploaded is untrusted. Parsing it runs in a child process (`run_isolated`) with
+CPU and memory limits, killed past `convert_timeout_seconds`, so a hostile file costs one
+killed process instead of a server thread that can't be stopped. Besides that: the type
+comes from the bytes, not the name; zip-based formats are checked for their unpacked size
+before a parser opens them; and the text is handed to the model as material, never
+instructions.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import hashlib
 import io
+import json
 import logging
+import os
+import sys
+import weakref
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +46,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
-from app.services import convert
 from app.services.convert import MAX_MARKDOWN_CHARS
 from app.services.llm import ImagePart, LLMProvider, Usage
 from app.services.search import BM25Search, Document, SearchHit
@@ -48,7 +56,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MAX_ZIP_ENTRIES = 2_000
-CONVERT_TIMEOUT_SECONDS = 20.0
 
 # Zip-based Office formats, told apart by the part only they have.
 _OFFICE_PARTS = {
@@ -128,13 +135,70 @@ def _office_type(data: bytes, settings: Settings) -> FileType:
     raise ApiError(415, "unsupported_file", "This file type can't be attached")
 
 
+class ConversionFailed(Exception):
+    """The child process overran, crashed or printed something that isn't a result."""
+
+
+_BACKEND_ROOT = str(Path(__file__).resolve().parents[2])  # where `app` imports from
+_gates: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()  # one per event loop
+
+
+def _gate(limit: int) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if loop not in _gates:
+        _gates[loop] = asyncio.Semaphore(limit)
+    return _gates[loop]
+
+
+async def run_isolated(op: str, params: dict, data: bytes, settings: Settings, *,
+                       module: str = "app.services.convert") -> dict:
+    """Run one conversion (`convert.run`) in a child process and return its result.
+
+    The child gets CPU-time and memory limits and is killed at `convert_timeout_seconds`;
+    at most `convert_concurrency` run at once, so a burst of uploads can't fork the
+    instance to death. Raises ConversionFailed on anything but a result.
+    """
+    def limits() -> None:  # runs in the child, before it starts Python
+        import resource
+
+        cpu = int(settings.convert_timeout_seconds) + 5
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
+        memory = settings.convert_memory_mb * 1024 * 1024
+        with contextlib.suppress(ValueError, OSError):  # macOS has no address-space limit
+            resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
+
+    env = {**os.environ, "PYTHONPATH": _BACKEND_ROOT}
+    async with _gate(settings.convert_concurrency):
+        child = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", module, op, json.dumps(params),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE, env=env, preexec_fn=limits)
+        try:
+            async with asyncio.timeout(settings.convert_timeout_seconds):
+                out, err = await child.communicate(data)
+        except TimeoutError:
+            raise ConversionFailed(f"{op} timed out") from None
+        finally:
+            if child.returncode is None:  # overran, or the request was cancelled
+                child.kill()
+                await child.wait()
+    if child.returncode != 0:
+        raise ConversionFailed(f"{op} failed (exit {child.returncode}): "
+                               f"{err.decode(errors='replace')[-500:]}")
+    try:
+        return json.loads(out)
+    except ValueError as exc:
+        raise ConversionFailed(f"{op} printed no result") from exc
+
+
 async def _read_scan(llm: LLMProvider, settings: Settings, data: bytes) -> tuple[str, Usage]:
     try:
-        async with asyncio.timeout(CONVERT_TIMEOUT_SECONDS):
-            pages, total = await asyncio.to_thread(
-                convert.render_pages, data, settings.image_max_side, settings.ocr_max_pages)
-    except Exception as exc:
-        log.warning("rendering a scanned PDF failed", exc_info=True)
+        result = await run_isolated("pages", {"max_side": settings.image_max_side,
+                                              "limit": settings.ocr_max_pages}, data, settings)
+        pages = [base64.b64decode(p) for p in result["pages"]]
+        total = result["total"]
+    except (ConversionFailed, KeyError) as exc:
+        log.warning("rendering a scanned PDF failed: %s", exc)
         raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
     gate = asyncio.Semaphore(OCR_CONCURRENCY)
 
@@ -204,13 +268,17 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
     mime = file_type.mime
     if file_type.kind == "image":
         try:
-            data, mime = await asyncio.to_thread(convert.prepare_image, data,
-                                                 settings.image_max_side,
-                                                 settings.image_max_pixels)
-        except convert.TooLarge as exc:
-            raise ApiError(413, "file_too_large", "This image is too large to attach") from exc
-        except convert.Unreadable as exc:
+            result = await run_isolated("image", {"max_side": settings.image_max_side,
+                                                  "max_pixels": settings.image_max_pixels},
+                                        data, settings)
+        except ConversionFailed as exc:
+            log.warning("image conversion failed: %s", exc)
             raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
+        if result.get("error") == "too_large":
+            raise ApiError(413, "file_too_large", "This image is too large to attach")
+        if "data" not in result:
+            raise ApiError(422, "unreadable_file", "This file couldn't be read")
+        data, mime = base64.b64decode(result["data"]), result["mime"]
     digest = hashlib.sha256(data).hexdigest()
 
     usage = Usage()
@@ -220,12 +288,14 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
         markdown, usage = await _describe(llm, settings, ImagePart(mime, data))
     elif markdown is None:
         try:
-            async with asyncio.timeout(CONVERT_TIMEOUT_SECONDS):
-                markdown = await asyncio.to_thread(convert.to_markdown, data,
-                                                   file_type.extension)
-        except Exception as exc:
-            log.warning("attachment conversion failed", exc_info=True)
+            result = await run_isolated("markdown", {"extension": file_type.extension}, data,
+                                        settings)
+        except ConversionFailed as exc:
+            log.warning("attachment conversion failed: %s", exc)
             raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
+        if "markdown" not in result:
+            raise ApiError(422, "unreadable_file", "This file couldn't be read")
+        markdown = result["markdown"]
         if file_type.extension == ".pdf" and len(markdown) < SCANNED_BELOW_CHARS \
                 and settings.supports_vision:
             markdown, usage = await _read_scan(llm, settings, data)
