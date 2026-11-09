@@ -74,7 +74,8 @@ class Tool:
 
 
 def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
-                past: PastSearch | None, web: WebSearch | None = None) -> list[Tool]:
+                past: PastSearch | None, web: WebSearch | None = None,
+                attachments: PastSearch | None = None) -> list[Tool]:
     tools: list[Tool] = []
     budget = settings.tool_result_char_budget
     help_center = rag.search
@@ -96,6 +97,15 @@ def build_tools(settings: Settings, rag: RagPipeline, account: SearchHit | None,
         tools.append(Tool("search_past_conversations", "Search this user's own earlier "
                           "conversations for something they said or decided before.",
                           QueryArgs, search_past))
+
+    if attachments is not None:
+        async def search_files(query: str) -> ToolOutput:
+            async with asyncio.timeout(settings.search_timeout_seconds):
+                return ToolOutput.of(await attachments(query), budget)
+
+        tools.append(Tool("search_attachments", "Search the files attached to this "
+                          "conversation for passages not shown in full: long documents are "
+                          "cut where they're attached.", QueryArgs, search_files))
 
     if account is not None:
         async def get_account() -> ToolOutput:
