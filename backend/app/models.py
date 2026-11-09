@@ -127,6 +127,8 @@ class Message(Base):
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        order_by="(Attachment.created_at, Attachment.id)", viewonly=True)
 
 
 class Attachment(Base):

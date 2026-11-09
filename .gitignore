@@ -25,3 +25,5 @@ Thumbs.db
 
 # Evaluation datasets: downloaded at run time, publishers' licenses
 backend/evals/data/
+# Attachments stored on local disk (originals; their Markdown is in the database)
+backend/data/

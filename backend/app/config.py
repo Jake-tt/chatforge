@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     idle_compaction_keep_turns: int = Field(default=1, ge=1)
     idle_compaction_min_tokens: int = 1000  # estimated; a shorter tail isn't worth a call
 
+    # Attachments (documents converted to Markdown at upload)
+    attachments_dir: str = "data/attachments"  # local original files, one per content hash
+    attachment_max_bytes: int = 10 * 1024 * 1024
+    attachment_max_unzipped_bytes: int = 50 * 1024 * 1024  # docx/xlsx/pptx, before parsing
+    # What the model sees of one document per turn; the local model's window is 8K tokens.
+    # Longer documents are cut and the cut is stated.
+    attachment_inline_chars: int = 6_000
+    uploads_per_minute: int = 20  # converting a file costs CPU
+
     # Recap shown on reopening a conversation that has been quiet this long.
     recap_after_seconds: int = Field(default=3600, ge=0)
     recap_min_messages: int = 4  # shorter conversations are read at a glance

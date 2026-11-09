@@ -7,7 +7,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import ColumnElement, and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,8 +19,9 @@ from app.agent.tools import WebSearch, build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
-from app.models import Conversation, Message
+from app.models import Attachment, Conversation, Message
 from app.schemas import (
+    AttachmentUploaded,
     BulkDeleteOut,
     ConversationCreate,
     ConversationDetail,
@@ -28,6 +29,7 @@ from app.schemas import (
     MessageCreate,
 )
 from app.services import summary
+from app.services.attachments import render, store_upload, turn_order
 from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, LLMError, Usage
@@ -52,7 +54,7 @@ async def _get_owned(
 ) -> Conversation:
     stmt = select(Conversation).where(Conversation.id == conversation_id, _owned_by(principal))
     if with_messages:
-        stmt = stmt.options(selectinload(Conversation.messages))
+        stmt = stmt.options(selectinload(Conversation.messages).selectinload(Message.attachments))
     conversation = await session.scalar(stmt)
     if conversation is None:
         # 404 rather than 403 so ids of other users' conversations aren't confirmed.
@@ -136,6 +138,28 @@ async def delete_all_conversations(
     return BulkDeleteOut(deleted=result.rowcount)
 
 
+@router.post("/{conversation_id}/attachments", status_code=201,
+             response_model=AttachmentUploaded)
+async def upload_attachment(
+    conversation_id: uuid.UUID,
+    file: UploadFile,
+    principal: Principal = Depends(get_principal),
+    ctx: AppContext = Depends(get_ctx),
+    session: AsyncSession = Depends(get_session),
+) -> AttachmentUploaded:
+    conversation = await _get_owned(session, principal, conversation_id)
+    if await ctx.quota.hit_rate_limit(f"upload:{principal.subject}",
+                                      ctx.settings.uploads_per_minute, 60):
+        raise ApiError(429, "rate_limited", "Too many uploads, slow down",
+                       headers={"Retry-After": "60"})
+    # One byte over the limit is enough to refuse it without reading the rest.
+    data = await file.read(ctx.settings.attachment_max_bytes + 1)
+    attachment = await store_upload(session, ctx.blobs, ctx.settings, conversation,
+                                    file.filename or "", data)
+    return AttachmentUploaded(id=attachment.id, filename=attachment.filename,
+                              kind=attachment.kind, chars=len(attachment.markdown))
+
+
 @router.post("/{conversation_id}/messages")
 async def send_message(
     conversation_id: uuid.UUID,
@@ -175,12 +199,17 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
                       body: MessageCreate, quota, session: AsyncSession,
                       lease: Lease) -> StreamingResponse:
     settings = ctx.settings
+    attached = await _unsent_attachments(session, conversation.id, body.attachment_ids)
     seq = await _allocate_seq(session, conversation.id)
-    session.add(Message(conversation_id=conversation.id, seq=seq, role="user",
-                        content=body.content))
+    message = Message(id=uuid.uuid4(), conversation_id=conversation.id, seq=seq, role="user",
+                      content=body.content)
+    session.add(message)
+    for attachment in attached:
+        attachment.message_id = message.id
     await session.commit()
-    await ctx.history.append(principal.subject, conversation.id,
-                             HistoryEntry(seq, "user", body.content))
+    await ctx.history.append(principal.subject, conversation.id, HistoryEntry(
+        seq, "user", body.content,
+        attachments=render(turn_order(attached), settings.attachment_inline_chars)))
 
     recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
     boundary = summary.summarized_through(settings, conversation)
@@ -199,6 +228,21 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     return TurnResponse(job, TurnProgress())
 
 
+async def _unsent_attachments(session: AsyncSession, conversation_id: uuid.UUID,
+                              ids: list[uuid.UUID]) -> list[Attachment]:
+    """The attachments a message may carry: uploaded to this conversation, not yet sent."""
+    wanted = set(ids)
+    if not wanted:
+        return []
+    rows = list(await session.scalars(select(Attachment).where(
+        Attachment.id.in_(wanted), Attachment.conversation_id == conversation_id,
+        Attachment.message_id.is_(None))))
+    if len(rows) != len(wanted):
+        raise ApiError(400, "invalid_attachment",
+                       "An attachment was not found in this conversation or was already sent")
+    return rows
+
+
 async def _undo_user_turn(session: AsyncSession, conversation_id: uuid.UUID, seq: int) -> None:
     """Remove the turn's user message and give its seq back.
 
@@ -206,6 +250,11 @@ async def _undo_user_turn(session: AsyncSession, conversation_id: uuid.UUID, seq
     conversation's lock, so nothing should have come after it, and if something did
     (the lock failed open) the seq is left as is rather than reused.
     """
+    undone = select(Message.id).where(Message.conversation_id == conversation_id,
+                                      Message.seq == seq).scalar_subquery()
+    # Its files go back to unsent, so the question can be sent again with them.
+    await session.execute(update(Attachment).where(Attachment.message_id == undone)
+                          .values(message_id=None))
     await session.execute(delete(Message).where(Message.conversation_id == conversation_id,
                                                  Message.seq == seq))
     await session.execute(update(Conversation)

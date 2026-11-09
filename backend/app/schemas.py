@@ -75,6 +75,18 @@ class CitationOut(BaseModel):
     cited: bool = True  # whether the answer cites it; rows stored before the check: yes
 
 
+class AttachmentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    filename: str
+    kind: str
+
+
+class AttachmentUploaded(AttachmentOut):
+    chars: int  # length of the Markdown it became
+
+
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -87,6 +99,7 @@ class MessageOut(BaseModel):
     input_tokens: int
     output_tokens: int
     citations: list[CitationOut] | None = None
+    attachments: list[AttachmentOut] = []
     created_at: datetime
 
 
@@ -100,3 +113,5 @@ class BulkDeleteOut(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=8000)
+    # Uploaded to this conversation first (POST .../attachments), each sent once.
+    attachment_ids: list[uuid.UUID] = Field(default_factory=list, max_length=4)

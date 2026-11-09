@@ -196,8 +196,9 @@ def to_messages(system: str, turns: list[ChatTurn], *, cache: bool = False
     for i, turn in enumerate(turns):
         breakpoint = cache and i == len(turns) - 2
         if turn.role == "user":
-            # Per-request context (sources) rides on the current turn only; see ChatTurn.
-            text = f"{turn.context}\n\n{turn.content}" if turn.context else turn.content
+            # Per-request context (sources) rides on the current turn only; attachments on
+            # every replay of their turn; the user's own words come last. See ChatTurn.
+            text = "\n\n".join(p for p in (turn.context, turn.attachments, turn.content) if p)
             messages.append(HumanMessage(body(text, breakpoint)))
         else:
             messages.append(AIMessage(body(turn.content, breakpoint)))

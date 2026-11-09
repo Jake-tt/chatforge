@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.services.attachments import BlobStore
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider
 from app.services.quota import QuotaService
@@ -35,4 +36,5 @@ class AppContext:
     turns: TurnGate  # one turn per conversation, a few per user
     chat_model: BaseChatModel  # the agent's answering model
     agent: Any  # the compiled LangGraph graph
+    blobs: BlobStore  # original bytes of attachments
     web_search: WebSearchProvider | None = None  # set when WEB_SEARCH_ENABLED
