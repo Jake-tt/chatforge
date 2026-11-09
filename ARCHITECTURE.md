@@ -172,6 +172,7 @@ flowchart TB
 | GET / POST | `/conversations` | 목록(최근 활동순) / 생성 |
 | GET / DELETE | `/conversations/{id}` | 상세(메시지 포함) / 소프트 삭제 |
 | GET | `/conversations/{id}/recap` | 오래 쉰 대화를 다시 열 때의 recap. 해당 없으면 204 |
+| POST | `/conversations/{id}/attachments` | 문서 업로드(multipart) → 마크다운 변환·저장. 다음 메시지의 `attachment_ids`로 보냄 |
 | DELETE | `/conversations` | 전체 소프트 삭제 |
 | POST | `/conversations/{id}/messages` | **메시지 전송 → SSE 스트림** |
 | GET | `/usage` | 오늘 사용량·한도 |
@@ -346,6 +347,15 @@ erDiagram
     int output_tokens
     json citations
   }
+  attachments {
+    uuid id PK
+    uuid conversation_id FK
+    uuid message_id FK "보낼 때 채움"
+    string kind
+    string filename
+    string sha256 "변환 재사용·원본 키"
+    text markdown
+  }
   usage_daily {
     string subject PK "user:id 또는 guest:id"
     date day PK
@@ -369,7 +379,7 @@ erDiagram
 - **사용량 기준값은 `usage_daily`**: 과금 대상 메시지와 같은 트랜잭션에서 UPSERT, 커밋 후 `quota.invalidate`. [ADR](decision-docs/adrs/database-as-source-of-truth-for-quota.md).
 - **결제 멱등**: `payment_events.id` PK + `ON CONFLICT DO NOTHING`.
 
-마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap.
+마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap → `0010` attachments.
 
 ---
 

@@ -18,6 +18,7 @@ from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, payments, usage
 from app.routers.conversations import drain_unfinished_writes
+from app.services.attachments import LocalBlobStore
 from app.services.chat_models import build_chat_model, warm_up_ollama
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
@@ -82,7 +83,9 @@ def create_app(
             redis_guard=guard,
             llm=provider,
             quota=QuotaService(guard, settings.quota_timezone),
-            history=HistoryCache(guard, settings.history_limit),
+            history=HistoryCache(guard, settings.history_limit,
+                                 settings.attachment_inline_chars),
+            blobs=LocalBlobStore(settings.attachments_dir),
             rag=rag,
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,

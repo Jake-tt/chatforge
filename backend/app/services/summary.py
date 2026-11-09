@@ -38,6 +38,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 
 from app.config import Settings
 from app.models import Conversation, Message
@@ -83,7 +84,7 @@ def needs_summary(settings: Settings, pending: list[ChatTurn]) -> bool:
     """`pending`: the messages after the boundary, including the reply just stored."""
     if not settings.summary_enabled:
         return False
-    chars = sum(len(t.content) for t in pending)
+    chars = sum(len(t.content) + len(t.attachments) for t in pending)
     return (len(pending) >= settings.summary_trigger_messages
             or chars // 4 >= settings.summary_trigger_tokens)
 
@@ -149,7 +150,7 @@ async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int, *,
         previous = conversation.summary
         subject = _owner_subject(conversation)
         messages = list(await session.scalars(
-            select(Message)
+            select(Message).options(selectinload(Message.attachments))
             .where(Message.conversation_id == conversation_id, Message.seq > start)
             .order_by(Message.seq)
             .limit(settings.summary_batch_messages)
@@ -162,7 +163,11 @@ async def _fold(ctx: AppContext, conversation_id: uuid.UUID, keep_turns: int, *,
         return
 
     limit = settings.conversation_summary_char_limit
-    transcript = "\n".join(f"{m.role}: {m.content}" for m in folded)
+    # Attached text isn't folded in whole, but the summary should still know it was there.
+    transcript = "\n".join(
+        f"{m.role}: {m.content}" + (f" [attached: {', '.join(a.filename for a in m.attachments)}]"
+                                    if m.attachments else "")
+        for m in folded)
     try:
         async with asyncio.timeout(settings.summary_timeout_seconds):
             result = await ctx.llm.complete(

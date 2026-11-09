@@ -22,8 +22,10 @@ from dataclasses import dataclass
 from redis.asyncio import Redis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models import Message
+from app.services.attachments import render, turn_order
 from app.services.llm import ChatTurn
 from app.services.redis_guard import RedisGuard
 
@@ -36,26 +38,28 @@ class HistoryEntry:
     role: str
     content: str
     kind: str = "answer"
+    attachments: str = ""  # rendered once (attachments.render) and replayed as is
 
     def to_turn(self) -> ChatTurn:
-        return ChatTurn(self.role, self.content)
+        return ChatTurn(self.role, self.content, attachments=self.attachments)
 
 
 def _encode(entry: HistoryEntry) -> str:
-    return json.dumps({"s": entry.seq, "r": entry.role, "c": entry.content, "k": entry.kind},
-                      ensure_ascii=False)
+    return json.dumps({"s": entry.seq, "r": entry.role, "c": entry.content, "k": entry.kind,
+                       "a": entry.attachments}, ensure_ascii=False)
 
 
 def _decode(raw: str) -> HistoryEntry:
     d = json.loads(raw)
     # Entries cached before kinds were stored have none; they were all answers.
-    return HistoryEntry(d["s"], d["r"], d["c"], d.get("k", "answer"))
+    return HistoryEntry(d["s"], d["r"], d["c"], d.get("k", "answer"), d.get("a", ""))
 
 
 class HistoryCache:
-    def __init__(self, guard: RedisGuard, limit: int):
+    def __init__(self, guard: RedisGuard, limit: int, attachment_chars: int):
         self._guard = guard
         self._limit = limit
+        self._attachment_chars = attachment_chars
 
     @staticmethod
     def key(owner: str, conversation_id: uuid.UUID) -> str:
@@ -72,11 +76,14 @@ class HistoryCache:
 
         rows = await session.scalars(
             select(Message)
+            .options(selectinload(Message.attachments))
             .where(Message.conversation_id == conversation_id)
             .order_by(Message.seq.desc())
             .limit(self._limit)
         )
-        entries = [HistoryEntry(m.seq, m.role, m.content, m.kind) for m in rows][::-1]
+        entries = [HistoryEntry(m.seq, m.role, m.content, m.kind,
+                                render(turn_order(m.attachments), self._attachment_chars))
+                   for m in rows][::-1]
         if entries:
             await self._guard.call(lambda r: self._fill(r, key, entries), None)
         return entries

@@ -127,6 +127,41 @@ class Message(Base):
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        order_by="(Attachment.created_at, Attachment.id)", viewonly=True)
+
+
+class Attachment(Base):
+    """A file uploaded into a conversation, kept as Markdown for the model.
+
+    Uploaded before the message that carries it is sent: `message_id` is set when it is.
+    The original bytes are stored once per content hash (`sha256`), and a file already
+    converted is never converted again.
+    """
+
+    __tablename__ = "attachments"
+    __table_args__ = (
+        Index("ix_attachments_conversation_id", "conversation_id"),
+        Index("ix_attachments_message_id", "message_id"),
+        Index("ix_attachments_sha256", "sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE")
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE")
+    )
+    kind: Mapped[str] = mapped_column(String(16))  # "document" (images come later)
+    mime: Mapped[str] = mapped_column(String(100))
+    filename: Mapped[str] = mapped_column(String(255))
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    markdown: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now()
+    )
 
 
 class UsageDaily(Base):

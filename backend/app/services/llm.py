@@ -30,6 +30,9 @@ class ChatTurn:
     # Per-request material for this turn only (e.g. retrieved sources). Sent ahead of
     # `content` but never stored, so replayed history stays byte-identical across requests.
     context: str = ""
+    # Files attached to this turn, rendered as Markdown. Unlike `context` they are part of
+    # the turn: stored with it and replayed, byte for byte, on every later request.
+    attachments: str = ""
 
 
 @dataclass(frozen=True)
