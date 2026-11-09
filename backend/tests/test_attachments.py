@@ -401,3 +401,65 @@ async def test_a_pdf_with_text_is_not_sent_to_the_vision_model(setup, monkeypatc
     up = await _upload(h, headers, cid, "report.pdf", _pdf("Quarterly revenue grew 12%"))
 
     assert up.status_code == 201 and seen == []
+
+
+# --- long documents: what was cut is found by search_attachments ----------------------
+
+def _long_document(fact: str) -> bytes:
+    filler = "\n\n".join(f"{i}장. 회의에서 일정과 예산을 다시 검토했다." for i in range(60))
+    return f"# 프로젝트 문서\n\n{filler}\n\n## 부록\n\n{fact}".encode()
+
+
+async def _agent_setup(make_harness, tmp_path, script: list):
+    agent = ScriptedChatModel(script=script)
+    h = await make_harness(chat_model=agent, attachments_dir=str(tmp_path),
+                           attachment_inline_chars=200)
+    headers = await h.guest()
+    return h, agent, headers
+
+
+async def test_a_cut_document_is_searched_for_the_part_not_shown(make_harness, tmp_path):
+    from tests.fakes import tool_call
+
+    h, agent, headers = await _agent_setup(make_harness, tmp_path, [
+        tool_call("search_attachments", query="출입 비밀번호"), AIMessage("ZEBRA-42예요.")])
+    cid = await h.new_conversation(headers)
+    manual = _long_document("출입 비밀번호는 ZEBRA-42이다.")
+    up = await _upload(h, headers, cid, "manual.md", manual)
+
+    r = await _send(h, headers, cid, "출입 비밀번호가 뭐야?", [up.json()["id"]])
+
+    first_call = agent.calls[0]
+    assert "search_attachments" in [t["function"]["name"] for t in first_call["tools"]]
+    assert "ZEBRA-42" not in first_call["messages"][-1].content  # cut from the inline copy
+    tool_result = agent.calls[1]["messages"][-1].content
+    assert "ZEBRA-42" in tool_result and "manual.md" in tool_result
+    assert "ZEBRA-42예요." in r.text
+
+
+async def test_attachment_search_is_offered_only_when_a_document_was_cut(make_harness, tmp_path):
+    h, agent, headers = await _agent_setup(make_harness, tmp_path, [AIMessage("네")])
+    cid = await h.new_conversation(headers)
+    up = await _upload(h, headers, cid, "short.md", "짧은 메모".encode())
+
+    await _send(h, headers, cid, "읽어줘", [up.json()["id"]])
+
+    assert "search_attachments" not in [t["function"]["name"] for t in agent.calls[0]["tools"]]
+
+
+async def test_attachment_search_stays_within_its_conversation(make_harness, tmp_path):
+    from tests.fakes import tool_call
+
+    h, agent, headers = await _agent_setup(make_harness, tmp_path, [
+        AIMessage("네"), tool_call("search_attachments", query="출입 비밀번호"),
+        AIMessage("모르겠어요")])
+    elsewhere = await h.new_conversation(headers)
+    secret = await _upload(h, headers, elsewhere, "manual.md",
+                           _long_document("출입 비밀번호는 ZEBRA-42이다."))
+    await _send(h, headers, elsewhere, "읽어둬", [secret.json()["id"]])
+    cid = await h.new_conversation(headers)
+    mine = await _upload(h, headers, cid, "other.md", _long_document("주차는 B2층이다."))
+
+    await _send(h, headers, cid, "출입 비밀번호가 뭐야?", [mine.json()["id"]])
+
+    assert "ZEBRA-42" not in agent.calls[-1]["messages"][-1].content

@@ -12,6 +12,10 @@ in Markdown by the model, and that description rides on the turn like a document
 image itself is sent too while its turn is among the latest few (`images_for_turns`).
 A PDF with no text (a scan) is read the same way, page by page, up to `ocr_max_pages`.
 
+A document longer than what fits on a turn is cut there, and the agent gets a
+`search_attachments` tool that finds the rest: the conversation's cut documents, split into
+passages and searched with the same BM25 as the help center (`search_attachments`).
+
 Everything uploaded is untrusted: the type comes from the bytes, not the name; zip-based
 formats are checked for their unpacked size before a parser opens them; and the text is
 handed to the model as material, never instructions.
@@ -28,12 +32,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
 from app.services.llm import ImagePart, LLMProvider, Usage
+from app.services.search import BM25Search, Document, SearchHit
 
 if TYPE_CHECKING:
     from app.config import Settings
@@ -63,6 +68,7 @@ OCR_SYSTEM = (
 )
 OCR_CONCURRENCY = 3  # pages read at once: bounds the burst against the model's rate limit
 SCANNED_BELOW_CHARS = 20  # a PDF with less text than this is taken for a scan
+PASSAGE_CHARS = 800  # search_attachments returns passages about this long
 
 IMAGE_SYSTEM = (
     "Describe this image in Markdown for someone who can't see it: what it shows, and for "
@@ -336,11 +342,60 @@ def render(attachments: list[Attachment], inline_chars: int) -> str:
         text = a.markdown
         if len(text) > inline_chars:
             text = (f"{text[:inline_chars]}\n(cut: {len(a.markdown) - inline_chars:,} more "
-                    "characters not shown)")
+                    "characters not shown; search_attachments finds the rest)")
         name = a.filename.replace('"', "'")
         parts.append(f'<attachment name="{name}">\n{text}\n</attachment>\n')
     parts.append("</attachments>")
     return "\n".join(parts)
+
+
+def _cut_documents(conversation_id, inline_chars: int):
+    return (Attachment.conversation_id == conversation_id, Attachment.message_id.is_not(None),
+            func.length(Attachment.markdown) > inline_chars)
+
+
+async def has_cut_documents(session: AsyncSession, conversation_id,
+                            inline_chars: int) -> bool:
+    found = await session.scalar(
+        select(Attachment.id).where(*_cut_documents(conversation_id, inline_chars)).limit(1))
+    return found is not None
+
+
+async def search_attachments(session: AsyncSession, conversation_id, query: str, *,
+                             inline_chars: int, limit: int) -> list[SearchHit]:
+    """Passages of this conversation's cut documents that match `query`."""
+    rows = await session.scalars(
+        select(Attachment).where(*_cut_documents(conversation_id, inline_chars)))
+    documents = [p for a in rows for p in passages(a)]
+    return await BM25Search(documents).search(query, limit) if documents else []
+
+
+def passages(attachment: Attachment) -> list[Document]:
+    """The document in passages of about PASSAGE_CHARS, each titled by its section."""
+    out: list[Document] = []
+    heading, buffer = "", ""
+
+    def flush() -> None:
+        nonlocal buffer
+        if buffer.strip():
+            part = f"{attachment.filename} › {heading or f'part {len(out) + 1}'}"
+            out.append(Document(id=f"{attachment.id}#{len(out)}", title=part,
+                                url=f"attachment:{attachment.id}", text=buffer.strip()))
+        buffer = ""
+
+    for block in attachment.markdown.split("\n\n"):
+        if block.startswith("#"):
+            flush()
+            heading = block.lstrip("#").strip()[:80]
+        while len(block) > PASSAGE_CHARS:  # one long paragraph: split it hard
+            flush()
+            buffer, block = block[:PASSAGE_CHARS], block[PASSAGE_CHARS:]
+            flush()
+        if len(buffer) + len(block) > PASSAGE_CHARS:
+            flush()
+        buffer += block + "\n\n"
+    flush()
+    return out
 
 
 def turn_order(attachments: list[Attachment]) -> list[Attachment]:

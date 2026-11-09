@@ -30,7 +30,14 @@ from app.schemas import (
     MessageCreate,
 )
 from app.services import summary
-from app.services.attachments import images_for_turns, render, store_upload, turn_order
+from app.services.attachments import (
+    has_cut_documents,
+    images_for_turns,
+    render,
+    search_attachments,
+    store_upload,
+    turn_order,
+)
 from app.services.chat_models import is_retryable
 from app.services.history import HistoryEntry
 from app.services.llm import ChatTurn, ImagePart, LLMError, Usage
@@ -235,9 +242,11 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
         else None
     past = _past_search(ctx, principal, conversation.id) if settings.past_search_enabled \
         else None
+    files = _attachment_search(ctx, conversation.id) if await has_cut_documents(
+        session, conversation.id, settings.attachment_inline_chars) else None
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
                    is_first_message, account, past, user_seq=seq, lease=lease,
-                   after_clarify=after_clarify)
+                   after_clarify=after_clarify, attachments=files)
     return TurnResponse(job, TurnProgress())
 
 
@@ -307,6 +316,17 @@ def _to_turns(entries: list[HistoryEntry],
     return turns
 
 
+def _attachment_search(ctx: AppContext, conversation_id: uuid.UUID) -> PastSearch:
+    async def search(query: str) -> list[SearchHit]:
+        # Own session, like the other lookups: it runs after the request's has closed.
+        async with ctx.sessionmaker() as session:
+            return await search_attachments(
+                session, conversation_id, query,
+                inline_chars=ctx.settings.attachment_inline_chars,
+                limit=ctx.settings.search_top_k)
+    return search
+
+
 def _past_search(ctx: AppContext, principal: Principal,
                  conversation_id: uuid.UUID) -> PastSearch:
     async def search(query: str) -> list[SearchHit]:
@@ -358,6 +378,7 @@ class ReplyJob:
     user_seq: int = 0  # the user message this turn answers; undone if nothing is shown
     lease: Lease | None = None  # admission held for the turn, released when it ends
     after_clarify: bool = False  # the previous assistant turn asked the user back
+    attachments: PastSearch | None = None  # set when a document here was cut
 
 
 # Writes that must outlive a cancelled request. `asyncio.shield` keeps no strong reference
@@ -493,7 +514,8 @@ def _agent_context(job: ReplyJob) -> AgentContext:
     ctx, s = job.ctx, job.ctx.settings
     return AgentContext(
         model=ctx.chat_model, rag=ctx.rag,
-        tools=build_tools(s, ctx.rag, job.account, job.past, _web_search(ctx, job.principal)),
+        tools=build_tools(s, ctx.rag, job.account, job.past, _web_search(ctx, job.principal),
+                          job.attachments),
         system=job.system, account=job.account, past=job.past,
         max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
         timeout_seconds=s.agent_timeout_seconds,

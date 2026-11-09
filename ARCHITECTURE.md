@@ -270,7 +270,7 @@ router 뒤의 세 갈래는 노드가 아니라 `add_conditional_edges("router",
 | `agent` | 답변 모델 호출. 도구 라운드가 남았으면 `bind_tools`. 깨진 도구 호출은 도구 없이 1회 재시도. 호출마다 타임아웃 |
 | `tools` | 라운드당 최대 `AGENT_MAX_TOOL_CALLS`개를 병렬 실행, 초과분은 에러로 반환, 출처 번호를 이어서 매김 |
 
-도구는 요청마다 [`build_tools`](backend/app/agent/tools.py)가 만듭니다: `search_help`, `search_past_conversations`, `get_account_usage`, `search_web`(켜져 있을 때). 도구 인자에 사용자 ID가 없고 소유자 필터는 클로저에 고정되므로, 프롬프트 인젝션으로 다른 사용자 데이터에 닿을 수 없습니다.
+도구는 요청마다 [`build_tools`](backend/app/agent/tools.py)가 만듭니다: `search_help`, `search_past_conversations`, `get_account_usage`, `search_web`(켜져 있을 때), `search_attachments`(잘린 첨부 문서가 있을 때). 도구 인자에 사용자 ID가 없고 소유자 필터는 클로저에 고정되므로, 프롬프트 인젝션으로 다른 사용자 데이터에 닿을 수 없습니다.
 
 상태(`AgentState`)의 `usage`, `citations`, `scratch`는 `operator.add` 리듀서로 노드 간 누적됩니다. 과금은 라우터, coordinator의 출처 압축, 모든 agent 라운드, 추천 질문 토큰의 합입니다.
 
