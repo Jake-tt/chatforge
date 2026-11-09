@@ -257,3 +257,92 @@ async def test_a_summary_still_knows_a_file_was_attached(make_harness, tmp_path)
     await h.ctx.tasks.drain()
 
     assert "[attached: budget.md]" in llm.summary_prompts[0]
+
+
+# --- images: only with a vision model ------------------------------------------------
+
+def _png(width: int = 40, height: int = 30, color=(200, 30, 30)) -> bytes:
+    from PIL import Image
+
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(out, "PNG")
+    return out.getvalue()
+
+
+def _jpeg_with_location() -> bytes:
+    from PIL import Image
+
+    image = Image.new("RGB", (40, 30), (10, 120, 10))
+    exif = Image.Exif()
+    exif[0x8825] = {2: (37.0, 33.0, 0.0)}  # GPSInfo: where the photo was taken
+    out = io.BytesIO()
+    image.save(out, "JPEG", exif=exif)
+    return out.getvalue()
+
+
+def _image_blocks(model: RecordingChatModel, call: int = -1) -> list[list[dict]]:
+    """Per user message of one call, its image content blocks."""
+    from langchain_core.messages import HumanMessage
+
+    return [[b for b in m.content if isinstance(b, dict) and b.get("type") == "image"]
+            if isinstance(m.content, list) else []
+            for m in model.calls[call]["messages"] if isinstance(m, HumanMessage)]
+
+
+async def test_an_image_is_described_once_and_sent_with_its_turn(setup):
+    h, model, headers, cid = await setup(vision_enabled=True)
+    used_before = (await h.client.get("/usage", headers=headers)).json()["used"]
+
+    up = await _upload(h, headers, cid, "chart.png", _png())
+    assert up.status_code == 201 and up.json()["kind"] == "image"
+    # Describing it is work the user asked for by uploading: charged like any reply.
+    assert (await h.client.get("/usage", headers=headers)).json()["used"] > used_before
+    await _send(h, headers, cid, "이 그림 설명해줘", [up.json()["id"]])
+
+    sent = model.current_turns[-1]
+    assert '<attachment name="chart.png">' in sent and "(fake) image" in sent
+    assert len(_image_blocks(model)[-1]) == 1
+
+
+async def test_an_image_is_sent_whole_for_three_turns_then_as_its_description(setup):
+    h, model, headers, cid = await setup(vision_enabled=True)
+    up = (await _upload(h, headers, cid, "chart.png", _png())).json()["id"]
+    await _send(h, headers, cid, "이 그림 설명해줘", [up])
+
+    for message in ("하나", "둘"):
+        await h.chat(headers, cid, message)
+    assert len(_image_blocks(model)[0]) == 1  # the third user turn back: still whole
+
+    await h.chat(headers, cid, "셋")
+    assert _image_blocks(model)[0] == []  # older: its description stands in
+    assert "(fake) image" in model.turns()[0][1]
+
+
+async def test_images_are_refused_without_a_vision_model(setup):
+    h, model, headers, cid = await setup()  # the fake provider, like a local model
+
+    r = await _upload(h, headers, cid, "chart.png", _png())
+
+    assert (r.status_code, r.json()["detail"]["code"]) == (415, "images_not_supported")
+
+
+async def test_a_large_image_is_scaled_down_and_its_location_dropped(setup, tmp_path):
+    from PIL import Image
+
+    h, model, headers, cid = await setup(vision_enabled=True)
+    big = await _upload(h, headers, cid, "wide.png", _png(3000, 600))
+    photo = await _upload(h, headers, cid, "photo.jpg", _jpeg_with_location())
+    assert (big.status_code, photo.status_code) == (201, 201)
+
+    stored = {p.stat().st_size: Image.open(p) for p in (tmp_path / "blobs").rglob("*")
+              if p.is_file()}
+    assert max(max(i.size) for i in stored.values()) <= 1568
+    assert all(0x8825 not in i.getexif() for i in stored.values())
+
+
+async def test_a_file_that_only_looks_like_an_image_is_refused(setup):
+    h, model, headers, cid = await setup(vision_enabled=True)
+
+    fake = await _upload(h, headers, cid, "x.png", b"\x89PNG\r\n\x1a\n" + b"junk" * 10)
+
+    assert (fake.status_code, fake.json()["detail"]["code"]) == (422, "unreadable_file")

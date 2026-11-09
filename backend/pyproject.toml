@@ -31,6 +31,8 @@ dependencies = [
     # before conversion, so magika's model isn't what decides it.
     "markitdown[pdf,docx,xlsx,pptx]>=0.1.9",
     "python-multipart>=0.0.32",
+    # Image attachments are decoded, scaled down and re-encoded without metadata.
+    "pillow>=11.0",
 ]
 
 [project.optional-dependencies]
