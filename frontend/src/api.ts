@@ -28,6 +28,12 @@ export interface AttachmentRef {
   filename: string;
   kind: string;
 }
+// Uploads are converted in the background: "processing" until ready or failed.
+export interface AttachmentStatus extends AttachmentRef {
+  status: "processing" | "ready" | "failed";
+  chars: number | null;
+  error_code: string | null;
+}
 // Shown on returning to a conversation left quiet for a while.
 export interface Recap {
   recap: string;
@@ -161,11 +167,13 @@ export const api = {
   uploadAttachment: (conversationId: string, file: File) => {
     const form = new FormData();
     form.append("file", file);
-    return json<AttachmentRef>(`/conversations/${conversationId}/attachments`, {
+    return json<AttachmentStatus>(`/conversations/${conversationId}/attachments`, {
       method: "POST",
       body: form,
     });
   },
+  getAttachment: (conversationId: string, attachmentId: string) =>
+    json<AttachmentStatus>(`/conversations/${conversationId}/attachments/${attachmentId}`),
   createConversation: () =>
     json<Conversation>("/conversations", { method: "POST", body: "{}" }),
   deleteConversation: (id: string) =>
