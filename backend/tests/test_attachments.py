@@ -10,7 +10,7 @@ import zipfile
 import pytest
 from langchain_core.messages import AIMessage
 
-from app.services import attachments
+from app.services import convert
 from tests.fakes import RecordingChatModel, ScriptedChatModel
 
 
@@ -128,13 +128,13 @@ async def test_pdf_and_docx_files_become_markdown(setup):
 
 async def test_the_same_file_is_converted_only_once(setup, monkeypatch):
     calls: list[str] = []
-    convert = attachments.to_markdown
+    original = convert.to_markdown
 
     def counting(data: bytes, extension: str) -> str:
         calls.append(extension)
-        return convert(data, extension)
+        return original(data, extension)
 
-    monkeypatch.setattr(attachments, "to_markdown", counting)
+    monkeypatch.setattr(convert, "to_markdown", counting)
     h, model, headers, cid = await setup()
     data = _docx("Launch in March")
 
@@ -389,13 +389,13 @@ async def test_a_single_unread_page_is_named_as_one(setup):
 
 async def test_a_pdf_with_text_is_not_sent_to_the_vision_model(setup, monkeypatch):
     seen: list[int] = []
-    original = attachments.render_pages
+    original = convert.render_pages
 
-    def counting(data: bytes, settings, limit: int):
+    def counting(data: bytes, max_side: int, limit: int):
         seen.append(limit)
-        return original(data, settings, limit)
+        return original(data, max_side, limit)
 
-    monkeypatch.setattr(attachments, "render_pages", counting)
+    monkeypatch.setattr(convert, "render_pages", counting)
     h, model, headers, cid = await setup(vision_enabled=True)
 
     up = await _upload(h, headers, cid, "report.pdf", _pdf("Quarterly revenue grew 12%"))

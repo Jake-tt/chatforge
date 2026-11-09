@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
+from app.services import convert
+from app.services.convert import MAX_MARKDOWN_CHARS
 from app.services.llm import ImagePart, LLMProvider, Usage
 from app.services.search import BM25Search, Document, SearchHit
 
@@ -45,7 +47,6 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_MARKDOWN_CHARS = 200_000  # stored; what the model sees is cut far shorter
 MAX_ZIP_ENTRIES = 2_000
 CONVERT_TIMEOUT_SECONDS = 20.0
 
@@ -127,66 +128,11 @@ def _office_type(data: bytes, settings: Settings) -> FileType:
     raise ApiError(415, "unsupported_file", "This file type can't be attached")
 
 
-def to_markdown(data: bytes, extension: str) -> str:
-    """Convert with MarkItDown, told the type we detected (it doesn't guess from the bytes)."""
-    from markitdown import MarkItDown, StreamInfo  # heavy: imported on first upload
-
-    result = MarkItDown(enable_plugins=False).convert_stream(
-        io.BytesIO(data), stream_info=StreamInfo(extension=extension))
-    return result.text_content.strip()[:MAX_MARKDOWN_CHARS]
-
-
-def prepare_image(data: bytes, settings: Settings) -> tuple[bytes, str]:
-    """The image re-encoded for the model: scaled to `image_max_side`, metadata dropped."""
-    from PIL import Image
-
-    try:
-        with Image.open(io.BytesIO(data)) as image:
-            # Read from the header, before any pixels are decoded.
-            if image.width * image.height > settings.image_max_pixels:
-                raise ApiError(413, "file_too_large", "This image is too large to attach")
-            image.load()
-            keeps_alpha = image.mode in ("RGBA", "LA", "P") and image.format != "JPEG"
-            image = image.convert("RGBA" if keeps_alpha else "RGB")  # first frame of a GIF
-    except ApiError:
-        raise
-    except Exception as exc:  # not really an image, or a damaged one
-        raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
-    image.thumbnail((settings.image_max_side, settings.image_max_side))
-    out = io.BytesIO()
-    # Saved without the original's EXIF: no camera, time or location goes along.
-    if keeps_alpha:
-        image.save(out, "PNG", optimize=True)
-        return out.getvalue(), "image/png"
-    image.save(out, "JPEG", quality=90)
-    return out.getvalue(), "image/jpeg"
-
-
-def render_pages(data: bytes, settings: Settings, limit: int) -> tuple[list[bytes], int]:
-    """The first `limit` pages as JPEG images sized for the model, and the page count."""
-    import pypdfium2 as pdfium
-
-    pdf = pdfium.PdfDocument(data)
-    try:
-        pages = []
-        for i in range(min(len(pdf), limit)):
-            page = pdf[i]
-            width, height = page.get_size()  # points
-            bitmap = page.render(scale=settings.image_max_side / max(width, height))
-            out = io.BytesIO()
-            bitmap.to_pil().convert("RGB").save(out, "JPEG", quality=85)
-            pages.append(out.getvalue())
-            page.close()
-        return pages, len(pdf)
-    finally:
-        pdf.close()
-
-
 async def _read_scan(llm: LLMProvider, settings: Settings, data: bytes) -> tuple[str, Usage]:
     try:
         async with asyncio.timeout(CONVERT_TIMEOUT_SECONDS):
-            pages, total = await asyncio.to_thread(render_pages, data, settings,
-                                                   settings.ocr_max_pages)
+            pages, total = await asyncio.to_thread(
+                convert.render_pages, data, settings.image_max_side, settings.ocr_max_pages)
     except Exception as exc:
         log.warning("rendering a scanned PDF failed", exc_info=True)
         raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
@@ -257,7 +203,14 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
     file_type = detect(data, filename, settings)
     mime = file_type.mime
     if file_type.kind == "image":
-        data, mime = await asyncio.to_thread(prepare_image, data, settings)
+        try:
+            data, mime = await asyncio.to_thread(convert.prepare_image, data,
+                                                 settings.image_max_side,
+                                                 settings.image_max_pixels)
+        except convert.TooLarge as exc:
+            raise ApiError(413, "file_too_large", "This image is too large to attach") from exc
+        except convert.Unreadable as exc:
+            raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
     digest = hashlib.sha256(data).hexdigest()
 
     usage = Usage()
@@ -268,7 +221,8 @@ async def store_upload(session: AsyncSession, blobs: BlobStore, llm: LLMProvider
     elif markdown is None:
         try:
             async with asyncio.timeout(CONVERT_TIMEOUT_SECONDS):
-                markdown = await asyncio.to_thread(to_markdown, data, file_type.extension)
+                markdown = await asyncio.to_thread(convert.to_markdown, data,
+                                                   file_type.extension)
         except Exception as exc:
             log.warning("attachment conversion failed", exc_info=True)
             raise ApiError(422, "unreadable_file", "This file couldn't be read") from exc
