@@ -409,6 +409,8 @@ def _past_search(ctx: AppContext, principal: Principal,
                 session, _owned_by(principal), conversation_id, query,
                 conversations=ctx.settings.past_search_conversations,
                 limit=ctx.settings.past_search_top_k,
+                messages_per_conversation=ctx.settings.past_search_messages_per_conversation,
+                message_chars=ctx.settings.past_search_message_chars,
             )
     return search
 

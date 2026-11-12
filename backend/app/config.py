@@ -60,6 +60,9 @@ class Settings(BaseSettings):
     account_context_enabled: bool = True  # cite the user's plan/usage when the router asks
     past_search_enabled: bool = True  # search the user's earlier conversations when asked
     past_search_conversations: int = 20  # most recently active ones are candidates
+    # Bounds what one search reads: each conversation's latest messages, each cut here.
+    past_search_messages_per_conversation: int = Field(default=50, ge=1)
+    past_search_message_chars: int = Field(default=2000, ge=1)
     past_search_top_k: int = 3
     search_after_turns: int = 3  # from this many user turns on, search whenever a query exists
     grounding_char_budget: int = 1500  # longer source text is compressed

@@ -1,9 +1,11 @@
 """Search over the user's own earlier conversations ("what did we decide last time?").
 
-Candidates are the messages of the owner's most recently active conversations, excluding
-the current one (already in the model's history) and deleted ones. They are ranked with
-the same BM25 as the help center, built per request: a few hundred short messages index in
-well under a millisecond, so no persistent index is needed at this scale. A managed
+Candidates are the latest messages of the owner's most recently active conversations,
+excluding the current one (already in the model's history) and deleted ones. They are
+ranked with the same BM25 as the help center, built per request, so what one request reads
+is bounded: at most `messages_per_conversation` rows of each conversation, each indexed up
+to `message_chars`. A few hundred short messages index in well under a millisecond, so no
+persistent index is needed at this scale. A managed
 full-text or vector index would replace this behind the same function.
 
 The owner filter comes from the caller (`conversations._owned_by`), so ownership rules live
@@ -12,7 +14,7 @@ in one place and other users' conversations can never be candidates.
 
 import uuid
 
-from sqlalchemy import ColumnElement, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Conversation, Message
@@ -29,6 +31,8 @@ async def search_past_conversations(
     *,
     conversations: int,
     limit: int,
+    messages_per_conversation: int,
+    message_chars: int,
 ) -> list[SearchHit]:
     recent = (
         select(Conversation.id)
@@ -37,17 +41,25 @@ async def search_past_conversations(
         .limit(conversations)
         .scalar_subquery()
     )
+    newest_first = func.row_number().over(
+        partition_by=Message.conversation_id, order_by=Message.seq.desc()).label("rank")
+    latest = (
+        select(Message.id, newest_first)
+        .where(Message.conversation_id.in_(recent))
+        .subquery()
+    )
     rows = await session.execute(
         select(Message, Conversation.title)
+        .join(latest, latest.c.id == Message.id)
         .join(Conversation, Message.conversation_id == Conversation.id)
-        .where(Message.conversation_id.in_(recent))
+        .where(latest.c.rank <= messages_per_conversation)
     )
     documents = [
         Document(
             id=f"{m.conversation_id}#{m.seq}",
             title=f"지난 대화 › {title or '제목 없음'}",
             url=f"/conversations/{m.conversation_id}",
-            text=f"{_ROLE_LABELS.get(m.role, m.role)}: {m.content}",
+            text=f"{_ROLE_LABELS.get(m.role, m.role)}: {m.content[:message_chars]}",
         )
         for m, title in rows
     ]
