@@ -5,6 +5,9 @@ answer, and citations checked against the sources the turn was given. Faithfulne
 that is checked by hand on a sample; a local model judging its own answers would only be a
 reference.
 
+Routing is the router's own call per flag. Asking back is scored on what the member saw
+(the turn ended with a clarifying question), which also counts when the router failed.
+
 Rates are over the turns they apply to and are None when no turn applies, so "no data" is
 never shown as a perfect score.
 """
@@ -46,10 +49,19 @@ def _normalized(text: str) -> str:
     return re.sub(r"[\s,]", "", text).casefold()
 
 
+def _found(spelling: str, text: str) -> bool:
+    # A number must not be part of a bigger one: "200,000" isn't in "2,000,000", nor
+    # "20만" in "120만".
+    s = _normalized(spelling)
+    pattern = ("(?<!\\d)" if s[:1].isdigit() else "") + re.escape(s) + \
+        ("(?!\\d)" if s[-1:].isdigit() else "")
+    return re.search(pattern, text) is not None
+
+
 def fact_hits(answer: str, facts: list[list[str]]) -> tuple[int, int]:
     """(groups found, groups expected): a group is found if any of its spellings is."""
     text = _normalized(answer)
-    found = sum(any(_normalized(s) in text for s in group) for group in facts)
+    found = sum(any(_found(s, text) for s in group) for group in facts)
     return found, len(facts)
 
 

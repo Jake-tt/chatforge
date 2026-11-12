@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from evals.cases import EvalCase, load_cases
-from evals.run_agent_eval import run_cases
+from evals.run_agent_eval import run_cases, score_turn
 from evals.scoring import TurnResult, fact_hits, render_markdown, summarize
 from tests.fakes import RecordingChatModel
 
@@ -101,6 +101,12 @@ def test_expected_facts_match_alternatives_regardless_of_spacing_and_case():
     assert fact_hits("한도는 20 만 토큰, kst 자정 초기화", [["200,000", "20만"], ["KST"]]) == (2, 2)
 
 
+def test_a_number_is_not_found_inside_a_bigger_one():
+    assert fact_hits("프로는 2,000,000 토큰", [["200,000"]]) == (0, 1)
+    assert fact_hits("120만 토큰", [["20만"]]) == (0, 1)
+    assert fact_hits("하루 200,000토큰", [["200,000"]]) == (1, 1)
+
+
 def test_citation_metrics_count_answers_not_citations():
     summary = summarize([
         _result("good", answer="한도는 200,000입니다 [1].", sources=[1, 2]),
@@ -140,6 +146,50 @@ def test_a_run_with_unreviewed_cases_is_not_a_baseline():
     assert "기준선 아님" not in render_markdown(summarize([_result("a")]))
 
 
+# --- reading a turn's stream ------------------------------------------------------------
+
+def _turn(*events, status=200, first=100.0, total=900.0) -> dict:
+    return {"status": status, "events": list(events), "first_delta_ms": first,
+            "total_ms": total}
+
+
+def test_a_turn_is_read_from_its_events():
+    case = EvalCase.model_validate(_case())
+    turn = _turn(("sources", {"citations": [{"n": 1}]}),
+                 ("sources", {"citations": [{"n": 1}, {"n": 2}]}),
+                 ("delta", {"text": "하루 200,000 "}), ("delta", {"text": "토큰 [1]"}),
+                 ("done", {"billed_tokens": 321}))
+
+    result = score_turn(case, [turn], predicted={"needs_search": True}, llm_calls=3)
+
+    assert (result.answer, result.sources, result.billed_tokens) == ("하루 200,000 토큰 [1]",
+                                                                      [1, 2], 321)
+    assert (result.fact_hits, result.error) == (1, None)
+
+
+def test_a_router_failure_and_a_failed_turn_are_kept_apart():
+    case = EvalCase.model_validate(_case(turns=["첫 질문", "두번째"]))
+    ok = _turn(("delta", {"text": "답"}), ("done", {"billed_tokens": 1}))
+
+    failed_router = score_turn(case, [ok, ok], predicted=None, llm_calls=2)
+    stream_error = score_turn(case, [ok, _turn(("error", {"message": "model down"}))],
+                              predicted={}, llm_calls=2)
+    http_error = score_turn(case, [ok, _turn(status=429)], predicted={}, llm_calls=0)
+
+    assert failed_router.predicted is None and failed_router.error is None
+    assert stream_error.error == "model down" and http_error.error == "HTTP 429"
+
+
+def test_a_broken_earlier_turn_fails_the_case():
+    # The scored turn would otherwise be judged on a history that never happened.
+    case = EvalCase.model_validate(_case(turns=["첫 질문", "두번째"]))
+    ok = _turn(("delta", {"text": "답"}), ("done", {"billed_tokens": 1}))
+
+    result = score_turn(case, [_turn(status=500), ok], predicted={}, llm_calls=1)
+
+    assert result.error == "turn 1: HTTP 500"
+
+
 # --- one run, end to end (fake models) ---------------------------------------------------
 
 async def test_a_run_drives_each_case_through_the_api_and_scores_it(make_settings):
@@ -152,19 +202,25 @@ async def test_a_run_drives_each_case_through_the_api_and_scores_it(make_setting
               setup={"memory": [{"subject": "나", "predicate": "좋아하는 음료",
                                  "object": "라떼"}]},
               expect={"facts": [["라떼"]]}),
+        # Several of each to set up: one database, so none of it may wait on another.
+        _case(id="seed-many", category="past", turns=["예전 얘기 기억나?"],
+              setup={"past": [["첫 대화"], ["두번째 대화", "더 있음"]],
+                     "memory": [{"subject": "나", "predicate": "사는 곳", "object": "부산"},
+                                {"subject": "나", "predicate": "직업", "object": "개발자"}]},
+              expect={"needs_past": True}),
     )]
 
     answers = RecordingChatModel(script=[])
     results = await run_cases(cases, make_settings(rag_enabled=True, suggestions_enabled=True),
                               chat_model=answers)
 
-    assert [r.case_id for r in results] == ["help-1", "past-1", "memory-1"]
+    assert [r.case_id for r in results] == ["help-1", "past-1", "memory-1", "seed-many"]
     assert all(r.error is None for r in results)
     assert all(r.predicted is not None for r in results)  # the router's log was captured
     assert all(r.llm_calls >= 1 and r.billed_tokens > 0 and r.total_ms > 0 for r in results)
-    # Only the last turn is scored: the multi-turn case is its second answer, the last call.
-    assert results[2].answer == f"reply {len(answers.calls)}"
-    assert answers.contents(-1)[-1].endswith("음료는?")
+    # Only the last turn is scored: the multi-turn case is the answer to its second message.
+    [call] = [i for i in range(len(answers.calls)) if answers.contents(i)[-1].endswith("음료는?")]
+    assert results[2].answer == f"reply {call + 1}"
     summary = summarize(results)
-    assert summary["cases"] == 3
+    assert summary["cases"] == 4
     assert "| needs_search |" in render_markdown(summary)

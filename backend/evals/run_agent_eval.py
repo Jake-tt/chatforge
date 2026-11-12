@@ -80,8 +80,7 @@ class _CallCounter(BaseCallbackHandler):
 
 
 class _RouteLog(logging.Handler):
-    """The router's decision per request: what it planned to look up and whether it asked
-    back (the `agent route` record in app.agent.graph)."""
+    """The router's decision per request (the `agent route` record in app.agent.graph)."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -91,13 +90,9 @@ class _RouteLog(logging.Handler):
         rid = request_id_var.get()
         if record.getMessage() != "agent route" or rid is None:
             return
-        plan = getattr(record, "plan", None)
-        self.routes[rid] = None if not getattr(record, "routed", False) else {
-            "needs_search": bool(plan and plan["help"]),
-            "needs_account": bool(plan and plan["account"]),
-            "needs_past": bool(plan and plan["past"]),
-            "needs_clarification": bool(getattr(record, "clarify", False)),
-        }
+        # The router's own flags, not the plan: the plan adds hybrid search from the third
+        # turn on, which would read as the router asking for it.
+        self.routes[rid] = getattr(record, "route", None)
 
 
 def _eval_settings(settings: Settings) -> Settings:
@@ -109,13 +104,20 @@ def _eval_settings(settings: Settings) -> Settings:
         "requests_per_minute": 100_000, "task_backend": "inline"})
 
 
+async def _new_conversation(client: httpx.AsyncClient, headers: dict) -> uuid.UUID:
+    return uuid.UUID((await client.post("/conversations", headers=headers, json={})).json()["id"])
+
+
 async def _seed(app, user_id: uuid.UUID, headers: dict, client: httpx.AsyncClient,
                 case: EvalCase) -> None:
-    ctx = app.state.ctx
-    async with ctx.sessionmaker() as session:
-        for messages in case.setup.past:
-            cid = uuid.UUID((await client.post("/conversations", headers=headers,
-                                               json={})).json()["id"])
+    # Conversations first, over HTTP; then one session writes the rest. A session holding
+    # a write while the API writes too would lock SQLite.
+    past = [await _new_conversation(client, headers) for _ in case.setup.past]
+    # A remembered fact records the conversation it came from.
+    source = (past[-1] if past else await _new_conversation(client, headers)) \
+        if case.setup.memory else None
+    async with app.state.ctx.sessionmaker() as session:
+        for cid, messages in zip(past, case.setup.past, strict=True):
             for seq, content in enumerate(messages, start=1):
                 session.add(Message(conversation_id=cid, seq=seq, role="user",
                                     content=content))
@@ -123,15 +125,8 @@ async def _seed(app, user_id: uuid.UUID, headers: dict, client: httpx.AsyncClien
                 message_count=len(messages), title=messages[0][:60]))
         for fact in case.setup.memory:
             await memory.add_fact(session, user_id, fact.subject, fact.predicate,
-                                  value=fact.object, conversation_id=cid if case.setup.past
-                                  else await _memory_source(client, headers))
+                                  value=fact.object, conversation_id=source)
         await session.commit()
-
-
-async def _memory_source(client: httpx.AsyncClient, headers: dict) -> uuid.UUID:
-    """A remembered fact records the conversation it came from."""
-    return uuid.UUID((await client.post("/conversations", headers=headers,
-                                        json={})).json()["id"])
 
 
 async def _ask(client: httpx.AsyncClient, headers: dict, cid: str, content: str) -> dict:
@@ -141,8 +136,8 @@ async def _ask(client: httpx.AsyncClient, headers: dict, cid: str, content: str)
     async with client.stream("POST", f"/conversations/{cid}/messages", headers=headers,
                              json={"content": content}, timeout=None) as response:
         if response.status_code != 200:
-            return {"events": [("error", {"message": f"HTTP {response.status_code}"})],
-                    "first_delta_ms": None, "total_ms": 0.0}
+            return {"status": response.status_code, "events": [], "first_delta_ms": None,
+                    "total_ms": (time.perf_counter() - started) * 1000}
         name = None
         async for line in response.aiter_lines():
             if line.startswith("event: "):
@@ -152,8 +147,40 @@ async def _ask(client: httpx.AsyncClient, headers: dict, cid: str, content: str)
                     first_delta = (time.perf_counter() - started) * 1000
                 events.append((name, json.loads(line[6:])))
                 name = None
-    return {"events": events, "first_delta_ms": first_delta,
+    return {"status": 200, "events": events, "first_delta_ms": first_delta,
             "total_ms": (time.perf_counter() - started) * 1000}
+
+
+def _failure(turn: dict) -> str | None:
+    if turn["status"] != 200:
+        return f"HTTP {turn['status']}"
+    errors = [data for name, data in turn["events"] if name == "error"]
+    return errors[-1].get("message", "error") if errors else None
+
+
+def score_turn(case: EvalCase, turns: list[dict], *, predicted: dict | None,
+               llm_calls: int) -> TurnResult:
+    """The result of a case from what each of its turns streamed; the last one is scored.
+
+    A failed earlier turn fails the case: the scored turn would be judged on a history
+    that never happened."""
+    error = next((f"turn {i}: {f}" for i, t in enumerate(turns[:-1], start=1)
+                  if (f := _failure(t))), None) or _failure(turns[-1])
+    by_name: dict[str, list[dict]] = {}
+    for name, data in turns[-1]["events"]:
+        by_name.setdefault(name, []).append(data)
+    answer = "".join(d["text"] for d in by_name.get("delta", []))
+    # Each `sources` event carries every source so far: the last one is the whole list.
+    sources = [c["n"] for c in (by_name.get("sources") or [{"citations": []}])[-1]["citations"]]
+    done = (by_name.get("done") or [{}])[-1]
+    hits, total = fact_hits(answer, case.expect.facts)
+    return TurnResult(
+        case_id=case.id, category=case.category, reviewed=case.reviewed,
+        expected={f: getattr(case.expect, f) for f in FLAGS}, predicted=predicted,
+        clarified="clarify" in by_name, answer=answer, sources=sources, fact_hits=hits,
+        fact_total=total, llm_calls=llm_calls, billed_tokens=done.get("billed_tokens", 0),
+        first_delta_ms=turns[-1]["first_delta_ms"], total_ms=turns[-1]["total_ms"],
+        error=error)
 
 
 async def _run_case(app, client: httpx.AsyncClient, counter: _CallCounter, routes: _RouteLog,
@@ -165,27 +192,13 @@ async def _run_case(app, client: httpx.AsyncClient, counter: _CallCounter, route
     await _seed(app, uuid.UUID(body["user"]["id"]), headers, client, case)
     cid = (await client.post("/conversations", headers=headers, json={})).json()["id"]
 
-    turn = None
+    turns = []
     rid = ""
     for i, content in enumerate(case.turns):
         rid = f"{case.id}-{i}-{uuid.uuid4().hex[:6]}"
-        turn = await _ask(client, {**headers, "X-Request-ID": rid}, cid, content)
-    events = turn["events"]
-    by_name: dict[str, list[dict]] = {}
-    for name, data in events:
-        by_name.setdefault(name, []).append(data)
-    answer = "".join(d["text"] for d in by_name.get("delta", []))
-    sources = [c["n"] for c in (by_name.get("sources") or [{"citations": []}])[-1]["citations"]]
-    done = (by_name.get("done") or [{}])[-1]
-    error = (by_name.get("error") or [{}])[-1].get("message") if "error" in by_name else None
-    hits, total = fact_hits(answer, case.expect.facts)
-    return TurnResult(
-        case_id=case.id, category=case.category, reviewed=case.reviewed,
-        expected={f: getattr(case.expect, f) for f in FLAGS},
-        predicted=routes.routes.get(rid), clarified="clarify" in by_name, answer=answer,
-        sources=sources, fact_hits=hits, fact_total=total, llm_calls=counter.calls[rid],
-        billed_tokens=done.get("billed_tokens", 0), first_delta_ms=turn["first_delta_ms"],
-        total_ms=turn["total_ms"], error=error)
+        turns.append(await _ask(client, {**headers, "X-Request-ID": rid}, cid, content))
+    return score_turn(case, turns, predicted=routes.routes.get(rid),
+                      llm_calls=counter.calls[rid])
 
 
 async def _warm_up(client: httpx.AsyncClient) -> None:

@@ -174,6 +174,9 @@ async def router(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     log.info("agent route", extra={
         "routed": route is not None,
         "clarify": bool(route and route.needs_clarification),
+        # The router's own call; the plan below may add to it (hybrid search).
+        "route": route.model_dump(include={"needs_search", "needs_account", "needs_past",
+                                           "needs_clarification"}) if route else None,
         "after_clarify": state.get("after_clarify", False),
         "plan": dataclasses.asdict(plan) if plan else None,
         "router_ms": round((time.perf_counter() - started) * 1000),
