@@ -18,7 +18,7 @@
 | # | 작업 | 유형 | 준비 상태 | 근거 문서 |
 |---|---|---|---|---|
 | 1 | 기억 그래프 003: 비활성 1시간 뒤 자동 추출 | AFK | PR 올림(`feat/memory-extraction`), 머지 대기 | `decision-docs/issues/261109-user-memory/003-automatic-extraction.md` |
-| 2 | 에이전트 감사 A1: 추천 질문 생성 중 연결이 끊기면 답변 미저장·미과금 (P0) | 버그 | 원인·완료 기준 정리됨 | `plan/261106_agent_audit.md` A1 |
+| 2 | 에이전트 감사 A1: 추천 질문 생성 중 연결이 끊기면 답변 미저장·미과금 (P0) | 버그 | PR 올림(`fix/persist-before-suggestions`, #39 위에 스택), 머지 대기 | `plan/261106_agent_audit.md` A1 |
 | 3 | 기억 그래프 004: 기억 화면 | HITL | 화면·문구를 사용자가 확인해야 함 | `decision-docs/issues/261109-user-memory/004-memory-screen.md` |
 | 4 | 에이전트 감사 A2~A9 | 혼합 | 감사 문서의 PR 순서(§3)를 따름 | `plan/261106_agent_audit.md` |
 | 5 | PR E: PubMed 도구와 평가 파이프라인 | 진행 중 | PMC 수집 스크립트(`backend/evals/fetch_pmc.py`)까지만 머지 | `plan/261028_langgraph_agent.md` PR E, `plan/261028_hardening_plan.md` |
