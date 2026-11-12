@@ -57,7 +57,9 @@ async def claim_guest(
     moved = await session.execute(
         update(Conversation)
         .where(Conversation.guest_id == guest_id)
-        .values(user_id=user_id, guest_id=None)
+        # Guests build no memory: what was said before signing up isn't read for it.
+        .values(user_id=user_id, guest_id=None,
+                memory_extracted_through_seq=Conversation.message_count)
     )
 
     day = quota.today()

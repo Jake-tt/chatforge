@@ -23,7 +23,7 @@ from sqlalchemy import update
 
 from app.config import Settings
 from app.models import Conversation
-from app.services import account, attachments, summary
+from app.services import account, attachments, memory_extraction, summary
 
 if TYPE_CHECKING:
     from app.context import AppContext
@@ -60,6 +60,7 @@ HANDLERS: dict[str, TaskHandler] = {
     summary.IDLE_TASK_NAME: summary.compact_idle_conversation,
     account.TASK_NAME: account.purge_user,
     attachments.TASK_NAME: attachments.convert_attachment,
+    memory_extraction.TASK_NAME: memory_extraction.extract_memory,
 }
 
 
