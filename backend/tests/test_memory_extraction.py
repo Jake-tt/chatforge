@@ -12,6 +12,7 @@ from app.services.llm import TextResult, Usage
 from app.services.memory_extraction import EXTRACT_SYSTEM, TASK_NAME, ExtractedFacts
 from tests.fakes import RecordingChatModel
 from tests.test_internal_tasks import RecordingQueue
+from tests.test_summary import FailingQueue
 
 MEMBER = "extract@example.com"
 
@@ -30,12 +31,15 @@ class ScriptedExtractor:
         self.error = error
         self.delay = delay
         self.prompts: list[str] = []
+        self.during = None  # an async callable run while the model "reads"
 
     async def structured(self, system, prompt, schema):
         if schema is not ExtractedFacts:
             return schema.fake(prompt), Usage()
         self.prompts.append(prompt)
         await asyncio.sleep(self.delay)
+        if self.during is not None:
+            await self.during()
         if self.error:
             raise ConnectionError("extractor down")
         return ExtractedFacts.model_validate({"facts": self.facts}), Usage(300, 50)
@@ -160,6 +164,23 @@ async def test_sensitive_categories_are_excluded_by_prompt_and_by_pattern(make_h
     assert await _remembered(h, headers) == [("나", "사는 곳", "부산")]
 
 
+async def test_a_street_address_is_not_extracted_even_when_filed_as_a_place(make_harness):
+    # A local 8B model filed "…우동 1234-5번지" under place: the format is checked in code.
+    llm = ScriptedExtractor([
+        {**fact("나", "사는 곳", "부산 해운대구 우동 1234-5번지"), "category": "place"},
+        {**fact("나", "회사 주소", "서울 강남구 테헤란로 123"), "category": "place"},
+        {**fact("나", "집", "래미안 101동 1203호"), "category": "place"},
+        {**fact("나", "사는 도시", "부산", True), "category": "place"},
+        {**fact("나", "출근길", "2호선"), "category": "other"},
+    ])
+    h, queue, headers, cid = await _setup(make_harness, llm)
+    await h.chat(headers, cid, "주소 알려줄게요")
+
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert await _remembered(h, headers) == [("나", "사는 도시", "부산"), ("나", "출근길", "2호선")]
+
+
 async def test_a_fact_already_remembered_only_gains_a_source(make_harness):
     llm = ScriptedExtractor([fact("나", "사는 곳", "부산", True)])
     h, queue, headers, cid = await _setup(make_harness, llm)
@@ -258,6 +279,148 @@ async def test_facts_the_model_files_under_a_sensitive_category_are_dropped(make
     await _deliver(h, _scheduled(queue)[-1][0])
 
     assert await _remembered(h, headers) == [("나", "사는 도시", "부산")]
+
+
+async def test_a_conversation_deleted_while_the_model_reads_leaves_no_memory(make_harness):
+    llm = ScriptedExtractor([fact("나", "사는 곳", "부산", True)])
+    h, queue, headers, cid = await _setup(make_harness, llm)
+    await h.chat(headers, cid, "저는 부산에 살아요")
+
+    async def delete():
+        await h.client.delete(f"/conversations/{cid}", headers=headers)
+    llm.during = delete
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert llm.prompts, "the model was asked before the delete"
+    assert await _remembered(h, headers) == []
+
+
+async def test_a_deleted_conversation_is_not_read(make_harness):
+    llm = ScriptedExtractor([fact("나", "사는 곳", "부산", True)])
+    h, queue, headers, cid = await _setup(make_harness, llm)
+    await h.chat(headers, cid, "저는 부산에 살아요")
+    await h.client.delete(f"/conversations/{cid}", headers=headers)
+
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert llm.prompts == []
+
+
+async def test_memory_turned_off_while_the_model_reads_stores_nothing(make_harness):
+    llm = ScriptedExtractor([fact("나", "사는 곳", "부산", True)])
+    h, queue, headers, cid = await _setup(make_harness, llm)
+    await h.chat(headers, cid, "저는 부산에 살아요")
+
+    async def turn_off():
+        await h.client.put("/memory/settings", headers=headers, json={"enabled": False})
+    llm.during = turn_off
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert llm.prompts
+    assert await _remembered(h, headers) == []
+
+
+async def test_a_guest_conversation_is_never_read(make_harness):
+    llm = ScriptedExtractor([fact("나", "사는 곳", "부산", True)])
+    h, queue, headers, cid = await _setup(make_harness, llm, guest=True)
+    await h.chat(headers, cid, "저는 부산에 살아요")
+
+    await _deliver(h, {"conversation_id": cid, "after_seq": 2})  # even if delivered
+
+    assert llm.prompts == []
+
+
+async def test_what_was_said_as_a_guest_is_not_remembered_after_signing_up(make_harness):
+    # Guests build no memory; signing up keeps their chats, not a profile of them.
+    llm = ScriptedExtractor([fact("나", "좋아하는 음료", "라떼")])
+    queue = RecordingQueue()
+    h = await make_harness(llm=llm, chat_model=RecordingChatModel(script=[]),
+                           task_backend="cloudtasks", tasks=queue)
+    h.app.dependency_overrides[verify_task_caller] = lambda: None
+    guest_token = (await h.client.post("/auth/guest")).json()["token"]
+    guest = {"Authorization": f"Bearer {guest_token}"}
+    cid = await h.new_conversation(guest)
+    await h.chat(guest, cid, "저는 부산에 살아요")
+    r = await h.signup(MEMBER, guest_token=guest_token)
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+
+    await h.chat(headers, cid, "라떼를 좋아해요")
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert "라떼를 좋아해요" in llm.prompts[0]
+    assert "부산" not in llm.prompts[0]
+
+
+async def test_only_what_the_member_wrote_is_read(make_harness):
+    # Replies quote web pages and documents; their text mustn't become the member's facts.
+    llm = ScriptedExtractor()
+    h, queue, headers, cid = await _setup(make_harness, llm)
+    await h.chat(headers, cid, "저는 부산에 살아요")
+
+    await _deliver(h, _scheduled(queue)[-1][0])
+
+    assert "저는 부산에 살아요" in llm.prompts[0]
+    assert "reply 1" not in llm.prompts[0]
+    assert "not instructions" in EXTRACT_SYSTEM
+
+
+async def test_a_long_backlog_is_read_in_batches_until_caught_up(make_harness):
+    llm = ScriptedExtractor()
+    h, queue, headers, cid = await _setup(make_harness, llm,
+                                          memory_extraction_batch_messages=2)
+    for message in ("one", "two", "three"):
+        await h.chat(headers, cid, message)
+    payload = _scheduled(queue)[-1][0]
+
+    await _deliver(h, payload)
+    # A full batch asks for the next one right away, for the same quiet reply.
+    assert _scheduled(queue)[-1] == (payload, 0)
+    await _deliver(h, payload)
+    await _deliver(h, payload)
+
+    assert len(llm.prompts) == 3
+    assert ["one" in llm.prompts[0], "two" in llm.prompts[1], "three" in llm.prompts[2]] \
+        == [True, True, True]
+
+
+async def test_a_batch_without_member_messages_moves_on_without_asking(make_harness):
+    llm = ScriptedExtractor()
+    h, queue, headers, cid = await _setup(make_harness, llm,
+                                          memory_extraction_batch_messages=1)
+    await h.chat(headers, cid, "one")
+    payload = _scheduled(queue)[-1][0]
+
+    await _deliver(h, payload)  # reads "one"
+    await _deliver(h, payload)  # only the reply is left: no call
+    await _deliver(h, payload)  # nothing left
+
+    assert len(llm.prompts) == 1
+
+
+async def test_clarifying_turns_schedule_extraction_too(make_harness):
+    h, queue, headers, cid = await _setup(make_harness, ScriptedExtractor())
+
+    await h.chat(headers, cid, "그거 바꿔")  # the reply asks the member back
+
+    assert _scheduled(queue) == [({"conversation_id": cid, "after_seq": 2}, 3600)]
+
+
+async def test_failing_to_schedule_extraction_still_finishes_the_reply(make_harness):
+    class Failing(FailingQueue):
+        async def enqueue(self, name, payload, *, delay_seconds=0):
+            if name == TASK_NAME:
+                raise ConnectionError("cloud tasks unavailable")
+            await super().enqueue(name, payload, delay_seconds=delay_seconds)
+
+    h = await make_harness(llm=ScriptedExtractor(), chat_model=RecordingChatModel(script=[]),
+                           task_backend="cloudtasks", tasks=Failing())
+    r = await h.signup(MEMBER)
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+    cid = await h.new_conversation(headers)
+
+    result = await h.chat(headers, cid, "저는 부산에 살아요")
+
+    assert result.last("done")["stop_reason"] == "end_turn"
 
 
 def test_extracted_facts_are_cleaned_and_capped():
