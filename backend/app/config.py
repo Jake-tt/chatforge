@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     ocr_max_pages: int = 10  # a scanned PDF is read this far; the rest is said to be unread
 
     memory_core_chars: int = 500  # the member's facts put on every turn; the rest by recall
+    # Facts a member shared, pulled from a conversation once it has been quiet this long.
+    memory_extraction_seconds: int = Field(default=3600, ge=0)  # 0 turns it off
+    memory_extraction_timeout_seconds: float = 60.0
+    memory_extraction_batch_messages: int = 40  # most messages read per run
 
     # Recap shown on reopening a conversation that has been quiet this long.
     recap_after_seconds: int = Field(default=3600, ge=0)

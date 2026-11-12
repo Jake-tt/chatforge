@@ -29,7 +29,7 @@ from app.schemas import (
     ConversationOut,
     MessageCreate,
 )
-from app.services import attachments, memory, summary
+from app.services import attachments, memory, memory_extraction, summary
 from app.services.attachments import (
     accept_upload,
     has_cut_documents,
@@ -661,6 +661,9 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
                 delay_seconds=ctx.settings.idle_compaction_seconds)
         except Exception:
             log.warning("could not schedule idle compaction", exc_info=True)
+    if job.memory is not None and message is not None and \
+            memory_extraction.wants_extraction(ctx):
+        await memory_extraction.schedule(ctx, job.conversation_id, message.seq)
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,

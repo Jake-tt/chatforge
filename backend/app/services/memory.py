@@ -161,6 +161,12 @@ CORE_INTRO = ("What you know about this user from earlier conversations. When it
 # How members name themselves in what they ask to be remembered. Shown to the model as
 # "사용자": it read "나 → 좋아하는 음료" as being about itself ("제가 좋아하는 음료는…").
 _SELF = {"나", "저", "내", "제", "me", "i", "myself", "user", "사용자"}
+SELF_NAME = "나"  # how `remember` is told to name the member
+
+
+def as_stored(name: str) -> str:
+    """One entity for the member, however a model wrote them ("사용자", "me", "나")."""
+    return SELF_NAME if normalize(name) in _SELF else name
 SHORT_ID = 8  # how much of a fact's id recall shows, and forget accepts
 
 _RRN = re.compile(r"\b\d{6}\s?-\s?[1-8]\d{6}\b")
