@@ -1,0 +1,1 @@
+{"id": "help-limit-free", "category": "help", "turns": ["무료 요금제는 하루에 토큰을 얼마나 쓸 수 있어?"], "expect": {"needs_search": true, "facts": [["200,000", "20만"]]}, "note": "형식 예시. 본 세트는 조각 003에서 만든다."}

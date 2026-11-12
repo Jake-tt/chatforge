@@ -487,6 +487,10 @@ async def test_every_route_decision_is_logged(make_harness, caplog):
 
     [record] = [r for r in caplog.records if r.message == "agent route"]
     assert record.routed and record.plan["help"] and record.plan["query"] == "토큰 한도"
+    # The router's own call, apart from the plan it led to (the plan also adds hybrid
+    # search after a few turns): what the evaluation scores the router on.
+    assert record.route == {"needs_search": True, "needs_account": False,
+                            "needs_past": False, "needs_clarification": False}
 
 
 async def test_a_routed_help_search_without_a_help_center_is_skipped_cleanly(make_harness,
