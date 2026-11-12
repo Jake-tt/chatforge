@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 
 from app.agent.graph import AgentContext
 from app.agent.stream import AgentStream
-from app.agent.tools import WebSearch, build_tools
+from app.agent.tools import MemoryTools, WebSearch, build_tools
 from app.context import AppContext
 from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
@@ -279,9 +279,17 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
         else None
     files = _attachment_search(ctx, conversation.id) if await has_cut_documents(
         session, conversation.id, settings.attachment_inline_chars) else None
+    remembers = principal.kind == "user" and await memory.is_enabled(session, principal.id)
+    if remembers:
+        # The core facts ride on this turn only (context): the system prompt stays cached.
+        core = await memory.core_block(session, principal.id, settings.memory_core_chars)
+        if core:
+            turns[-1] = dataclasses.replace(turns[-1], context=core)
     job = ReplyJob(ctx, principal, conversation.id, system, turns, body.content,
                    is_first_message, account, past, user_seq=seq, lease=lease,
-                   after_clarify=after_clarify, attachments=files)
+                   after_clarify=after_clarify, attachments=files,
+                   memory=_memory_tools(ctx, principal.id, conversation.id)
+                   if remembers else None)
     return TurnResponse(job, TurnProgress())
 
 
@@ -353,6 +361,34 @@ def _to_turns(entries: list[HistoryEntry],
     return turns
 
 
+def _memory_tools(ctx: AppContext, user_id: uuid.UUID,
+                  conversation_id: uuid.UUID) -> MemoryTools:
+    # Own sessions, like the other lookups: they run after the request's has closed.
+    async def remember(subject: str, predicate: str, obj: str, is_name: bool) -> str | None:
+        refused = memory.sensitive_reason(f"{subject} {predicate} {obj}")
+        if refused:
+            return refused
+        async with ctx.sessionmaker() as session:
+            await memory.add_fact(session, user_id, subject, predicate,
+                                  obj=obj if is_name else None,
+                                  value=None if is_name else obj,
+                                  conversation_id=conversation_id)
+            await session.commit()
+        return None
+
+    async def recall(query: str) -> list[SearchHit]:
+        async with ctx.sessionmaker() as session:
+            return await memory.recall(session, user_id, query, ctx.settings.search_top_k)
+
+    async def forget(ids: list[str]) -> int:
+        async with ctx.sessionmaker() as session:
+            removed = await memory.forget_ids(session, user_id, ids)
+            await session.commit()
+            return removed
+
+    return MemoryTools(remember=remember, recall=recall, forget=forget)
+
+
 def _attachment_search(ctx: AppContext, conversation_id: uuid.UUID) -> PastSearch:
     async def search(query: str) -> list[SearchHit]:
         # Own session, like the other lookups: it runs after the request's has closed.
@@ -416,6 +452,7 @@ class ReplyJob:
     lease: Lease | None = None  # admission held for the turn, released when it ends
     after_clarify: bool = False  # the previous assistant turn asked the user back
     attachments: PastSearch | None = None  # set when a document here was cut
+    memory: MemoryTools | None = None  # a member with memory on
 
 
 # Writes that must outlive a cancelled request. `asyncio.shield` keeps no strong reference
@@ -552,7 +589,7 @@ def _agent_context(job: ReplyJob) -> AgentContext:
     return AgentContext(
         model=ctx.chat_model, rag=ctx.rag,
         tools=build_tools(s, ctx.rag, job.account, job.past, _web_search(ctx, job.principal),
-                          job.attachments),
+                          job.attachments, job.memory),
         system=job.system, account=job.account, past=job.past,
         max_tool_rounds=s.agent_max_tool_rounds, max_tool_calls=s.agent_max_tool_calls,
         timeout_seconds=s.agent_timeout_seconds,

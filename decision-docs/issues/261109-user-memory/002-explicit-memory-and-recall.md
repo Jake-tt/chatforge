@@ -17,10 +17,10 @@ DEC-BACKEND-AGENT-TOOLS-001, DEC-BACKEND-PROMPT-CACHE-001
 - 저장 전 패턴 필터(카드·주민번호·비밀번호·계좌)
 
 ## Acceptance Criteria
-- [ ] "기억해줘"로 저장한 사실이 다음 대화의 현재 턴 context에 나타나고 system은 그대로다
-- [ ] recall_memory가 1-hop 관계를 출처로 돌려준다
-- [ ] 패턴에 걸리는 값은 저장하지 않고 모델에게 이유를 알린다
-- [ ] 게스트·기억 끔에서는 도구와 주입이 없다
+- [x] "기억해줘"로 저장한 사실이 다음 대화의 현재 턴 context에 나타나고 system은 그대로다
+- [x] recall_memory가 1-hop 관계를 출처로 돌려준다
+- [x] 패턴에 걸리는 값은 저장하지 않고 모델에게 이유를 알린다
+- [x] 게스트·기억 끔에서는 도구와 주입이 없다
 
 ## Verification
 - Package: Standard Guardrail (+ 패턴 필터 단위 테스트)

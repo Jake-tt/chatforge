@@ -226,7 +226,10 @@ class RagPipeline:
 
 def router_prompt(turns: list[ChatTurn]) -> str:
     recent = "\n".join(f"{t.role}: {t.content[:500]}" for t in turns[-6:-1])
-    return f"Conversation so far:\n{recent or '(none)'}\n\n" \
+    # When routing, the latest turn's context holds only the member's memory (sources come
+    # after). Without it the router asks the user for what memory already says.
+    known = f"Known about the user:\n{turns[-1].context}\n\n" if turns[-1].context else ""
+    return f"{known}Conversation so far:\n{recent or '(none)'}\n\n" \
            f"Latest user message: {turns[-1].content}"
 
 
