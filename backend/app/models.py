@@ -96,6 +96,9 @@ class Conversation(Base):
     recap: Mapped[str | None] = mapped_column(Text)
     recap_questions: Mapped[list[str] | None] = mapped_column(JSON)
     recap_through_seq: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Messages up to this seq have been read for facts to remember (members only).
+    memory_extracted_through_seq: Mapped[int] = mapped_column(Integer, default=0,
+                                                              server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="conversation", order_by="Message.seq"
