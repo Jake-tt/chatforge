@@ -2,6 +2,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -106,6 +107,9 @@ class Settings(BaseSettings):
 
     # LLM traces to a local Langfuse (dev and evaluation only; refused on Cloud Run).
     langfuse_enabled: bool = False
+    langfuse_host: str = "http://localhost:3000"  # must be local: the SDK defaults to Cloud
+    langfuse_public_key: SecretStr | None = None
+    langfuse_secret_key: SecretStr | None = None
 
     memory_core_chars: int = 500  # the member's facts put on every turn; the rest by recall
     # Facts a member shared, pulled from a conversation once it has been quiet this long.
@@ -180,9 +184,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
-        # Traces carry members' conversations: Cloud Run sets K_SERVICE.
-        if self.langfuse_enabled and os.environ.get("K_SERVICE"):
-            raise ValueError("LANGFUSE_ENABLED is for development and evaluation, not Cloud Run")
+        if self.langfuse_enabled:
+            self._check_tracing()
         if self.web_search_enabled and not self.tavily_api_key:
             raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
         if self.env == "prod":
@@ -204,6 +207,16 @@ class Settings(BaseSettings):
             if "trusted_proxy_hops" not in self.model_fields_set:
                 raise ValueError("TRUSTED_PROXY_HOPS must be set in prod")
         return self
+
+    def _check_tracing(self) -> None:
+        # Traces carry members' conversations and memories: development and evaluation
+        # only, to a Langfuse on this machine. Cloud Run sets K_SERVICE.
+        if self.env == "prod" or os.environ.get("K_SERVICE"):
+            raise ValueError("LANGFUSE_ENABLED is for development and evaluation, not production")
+        if urlparse(self.langfuse_host).hostname not in ("localhost", "127.0.0.1"):
+            raise ValueError("LANGFUSE_HOST must be a local Langfuse (localhost or 127.0.0.1)")
+        if not (self.langfuse_public_key and self.langfuse_secret_key):
+            raise ValueError("LANGFUSE_ENABLED needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY")
 
     def token_weights(self) -> TokenWeights:
         return TokenWeights(self.token_weight_output, self.token_weight_cache_read,

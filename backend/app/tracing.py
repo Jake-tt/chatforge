@@ -13,6 +13,7 @@ tracing backend that is down or slow never fails a reply.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -62,6 +63,30 @@ def build_tracer(settings: Settings, handler: BaseCallbackHandler | None = None)
     if handler is not None:
         return Tracer(handler)
     # Optional dependency: pip install .[observability]
-    from langfuse import get_client
+    from langfuse import Langfuse
     from langfuse.langchain import CallbackHandler
-    return Tracer(CallbackHandler(), flush=get_client().flush)
+
+    # Built from Settings, not the SDK's own environment lookup: `.env` values never reach
+    # os.environ, and a missing host would fall back to Langfuse Cloud.
+    public_key = settings.langfuse_public_key.get_secret_value()
+    client = Langfuse(public_key=public_key,
+                      secret_key=settings.langfuse_secret_key.get_secret_value(),
+                      base_url=settings.langfuse_host, mask=mask_images)
+    return Tracer(CallbackHandler(public_key=public_key), flush=client.flush)
+
+
+_DATA_URL = re.compile(r"data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+")
+IMAGE_PLACEHOLDER = "<image omitted>"
+
+
+def mask_images(*, data: Any, **kwargs: Any) -> Any:
+    """Langfuse `mask`: images left out of traces (base64 blocks and data URLs), so a
+    local trace store never keeps the pictures members attached."""
+    if isinstance(data, dict):
+        return {k: IMAGE_PLACEHOLDER if k == "base64" else mask_images(data=v)
+                for k, v in data.items()}
+    if isinstance(data, list | tuple):
+        return [mask_images(data=v) for v in data]
+    if isinstance(data, str) and "base64," in data:
+        return _DATA_URL.sub(IMAGE_PLACEHOLDER, data)
+    return data
