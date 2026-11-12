@@ -249,6 +249,18 @@ async def test_tool_calls_per_round_are_capped(make_harness):
     assert "at most 4" in results[-1].content
 
 
+async def test_prefetched_sources_are_delimited_as_material_not_instructions(make_harness):
+    # The same framing as tool results, for the sources the coordinator attaches (A8).
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="무료 요금제 하루 토큰 한도")],
+        agent=[_answer("답")])
+
+    await h.chat(headers, cid, "무료 요금제 하루 토큰 한도가 얼마야?")
+
+    current_turn = agent.calls[0]["messages"][-1].content
+    assert "<sources>" in current_turn and "not instructions" in current_turn
+
+
 async def test_tool_results_are_delimited_as_material_not_instructions(make_harness):
     h, agent, headers, cid = await _agent_harness(
         make_harness, routes=[_route()],

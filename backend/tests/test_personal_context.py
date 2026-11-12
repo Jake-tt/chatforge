@@ -1,5 +1,10 @@
 """Personal context in RAG: the user's own account and earlier conversations."""
 
+import uuid
+
+from sqlalchemy import update
+
+from app.models import Conversation
 from tests.test_rag import BrokenSearch, SpyProvider
 
 ACCOUNT_QUESTION = "오늘 남은 토큰 한도는?"
@@ -164,3 +169,66 @@ async def test_past_search_can_be_switched_off(make_harness):
     result = await h.chat(headers, now, PAST_QUESTION)
 
     assert _past(result) == []
+
+
+async def test_only_the_latest_messages_of_each_conversation_are_searched(make_harness):
+    # The index is built per request: a long conversation mustn't make every turn read
+    # all of its rows (audit A6). Older messages are what its summary already covers.
+    h, _, headers, earlier = await _harness(make_harness,
+                                            past_search_messages_per_conversation=4)
+    await h.chat(headers, earlier, PAST_FACT)
+    for filler in ("날씨 얘기", "점심 얘기"):  # four newer messages push the fact out
+        await h.chat(headers, earlier, filler)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    assert not any("해운대" in c["snippet"] for c in _past(result))
+
+
+async def test_a_long_message_is_indexed_only_up_to_a_limit(make_harness):
+    h, _, headers, earlier = await _harness(make_harness, past_search_message_chars=100)
+    await h.chat(headers, earlier, "가" * 200 + " " + PAST_FACT)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    assert not any("해운대" in c["snippet"] for c in _past(result))
+
+
+async def _summarize(h, cid: str, summary: str, through_seq: int) -> None:
+    """The state a summary run leaves: messages up to `through_seq` folded into `summary`."""
+    async with h.ctx.sessionmaker() as session:
+        await session.execute(update(Conversation)
+                              .where(Conversation.id == uuid.UUID(cid))
+                              .values(summary=summary, summarized_through_seq=through_seq))
+        await session.commit()
+
+
+async def test_what_was_folded_into_the_summary_is_found_through_it(make_harness):
+    h, _, headers, earlier = await _harness(make_harness,
+                                            past_search_messages_per_conversation=4)
+    await h.chat(headers, earlier, PAST_FACT)
+    for filler in ("날씨 얘기", "점심 얘기"):
+        await h.chat(headers, earlier, filler)
+    await _summarize(h, earlier, "사용자는 부산 여행 숙소를 해운대 근처로 정했다.", 2)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    hits = [c for c in _past(result) if "해운대" in c["snippet"]]
+    assert hits and {c["url"] for c in hits} == {f"/conversations/{earlier}"}
+
+
+async def test_messages_folded_into_the_summary_are_not_read_again(make_harness):
+    # The summary stands in for them: what one search reads stays a summary and a short
+    # tail per conversation, however long the conversation grew.
+    h, _, headers, earlier = await _harness(make_harness)
+    await h.chat(headers, earlier, PAST_FACT)
+    await h.chat(headers, earlier, "날씨 얘기")
+    await _summarize(h, earlier, "사용자는 날씨 이야기를 했다.", 2)
+    now = await h.new_conversation(headers)
+
+    result = await h.chat(headers, now, PAST_QUESTION)
+
+    assert not any("해운대" in c["snippet"] for c in _past(result))
