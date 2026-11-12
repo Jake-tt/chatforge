@@ -461,10 +461,20 @@ _UNFINISHED_WRITES: set[asyncio.Task] = set()
 
 
 async def _survive_cancellation[T](coro: Awaitable[T]) -> T:
+    """Run a write to the end even if the request is cancelled meanwhile.
+
+    A cancelled caller still waits for it before the cancellation moves on, so cleanup
+    after it (releasing the turn) never runs ahead of the write. `asyncio.wait` doesn't
+    cancel what it waits for, so a second cancellation can't stop the write either.
+    """
     task = asyncio.ensure_future(coro)
     _UNFINISHED_WRITES.add(task)
     task.add_done_callback(_UNFINISHED_WRITES.discard)
-    return await asyncio.shield(task)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task})
+        raise
 
 
 async def _charge(job: ReplyJob, billed: int) -> None:
@@ -626,33 +636,18 @@ def _wants_followups(ctx: AppContext, answer: str, stop_reason: str | None,
         and stop_reason != "refusal"
 
 
-async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
-                        citations: list[dict] | None, stop_reason: str | None, *,
-                        followups: bool = True, summarize: bool = True,
-                        options: list[str] | None = None,
-                        ) -> AsyncIterator[str]:
-    """Storage and billing, background tasks, clarify options or suggestions, then `done`.
-
-    The answer is stored and charged before anything else is awaited or sent: the client
-    has seen all of it, so a disconnect from here on (while suggestions are made, or an
-    event is written) must not leave it unstored and unbilled. The suggestions' tokens are
-    charged on their own once they're made.
-
-    A clarifying turn passes `followups=False, summarize=False` and its `options`:
-    suggestions would answer for the user, and summarizing would fold the open question
-    away. Its options take the place of suggestions.
-    """
+async def _store_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
+                       citations: list[dict] | None, *, summarize: bool,
+                       options: list[str] | None) -> Message | None:
+    """Store and charge the reply, then schedule its background tasks: one unit that a
+    disconnect can't cut short."""
     ctx = job.ctx
-    weights = ctx.settings.token_weights()
-    message = await _survive_cancellation(
-        _persist_reply(job, answer, usage, citations, options=options))
-    billed = usage.billed(weights)
-    message_id = message.id if message else None
+    message = await _persist_reply(job, answer, usage, citations, options=options)
     if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
             "conversation_id": str(job.conversation_id), "first_message": job.first_message,
         })
-    if summarize and message_id is not None and summary.needs_summary(
+    if summarize and message is not None and summary.needs_summary(
         ctx.settings, [*turns, ChatTurn("assistant", answer)]
     ):
         try:
@@ -673,12 +668,38 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
     if job.memory is not None and message is not None and \
             memory_extraction.wants_extraction(ctx):
         await memory_extraction.schedule(ctx, job.conversation_id, message.seq)
+    return message
+
+
+async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage: Usage,
+                        citations: list[dict] | None, stop_reason: str | None, *,
+                        followups: bool = True, summarize: bool = True,
+                        options: list[str] | None = None,
+                        ) -> AsyncIterator[str]:
+    """Storage and billing, background tasks, clarify options or suggestions, then `done`.
+
+    The answer is stored and charged before anything else is awaited or sent: the client
+    has seen all of it, so a disconnect from here on (while suggestions are made, or an
+    event is written) must not leave it unstored and unbilled. The suggestions' tokens are
+    charged on their own once they're made.
+
+    A clarifying turn passes `followups=False, summarize=False` and its `options`:
+    suggestions would answer for the user, and summarizing would fold the open question
+    away. Its options take the place of suggestions.
+    """
+    ctx = job.ctx
+    weights = ctx.settings.token_weights()
+    message = await _survive_cancellation(
+        _store_reply(job, turns, answer, usage, citations, summarize=summarize,
+                     options=options))
+    message_id = message.id if message else None
+    billed = usage.billed(weights)
     if options is not None:
         yield _sse("clarify", {"options": options})
     if message is not None and _wants_followups(ctx, answer, stop_reason, followups):
         questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
         if extra := suggestion_usage.billed(weights):
-            await _charge(job, extra)
+            await _survive_cancellation(_charge(job, extra))
         usage += suggestion_usage
         billed += extra
         if questions:

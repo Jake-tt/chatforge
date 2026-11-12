@@ -330,3 +330,21 @@ async def test_a_disconnect_at_the_clarify_event_still_stores_the_question(make_
     await stream.aclose()  # the client went away while the options were being sent
 
     assert await _messages(h, headers, cid) == [("user", "질문"), ("assistant", question)]
+
+
+async def test_a_cancelled_request_waits_for_its_write_before_moving_on():
+    # The caller's cleanup (releasing the turn) must not run before the reply is stored:
+    # a retry taking the freed turn would get its seq ahead of the late reply.
+    finished = []
+
+    async def write():
+        await asyncio.sleep(0.05)
+        finished.append("stored")
+
+    waiter = asyncio.ensure_future(_survive_cancellation(write()))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    assert finished == ["stored"]
