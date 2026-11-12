@@ -172,6 +172,9 @@ flowchart TB
 | GET / POST | `/conversations` | 목록(최근 활동순) / 생성 |
 | GET / DELETE | `/conversations/{id}` | 상세(메시지 포함) / 소프트 삭제 |
 | GET | `/conversations/{id}/recap` | 오래 쉰 대화를 다시 열 때의 recap. 해당 없으면 204 |
+| GET / DELETE | `/memory` | 회원의 기억 목록과 켜짐 여부 / 전체 삭제. 게스트는 403 |
+| DELETE | `/memory/{id}` | 기억 항목 삭제 |
+| PUT | `/memory/settings` | 기억 켜기·끄기 |
 | POST | `/conversations/{id}/attachments` | 문서·이미지 업로드(multipart). 빠른 검사 후 202(처리 중), 변환은 `convert_attachment` 작업. 같은 파일이 이미 변환돼 있으면 201(준비됨) |
 | GET | `/conversations/{id}/attachments/{aid}` | 첨부 변환 상태(processing·ready·failed와 오류 코드) |
 | DELETE | `/conversations` | 전체 소프트 삭제 |
@@ -357,6 +360,21 @@ erDiagram
     string sha256 "변환 재사용·원본 키"
     text markdown
   }
+  memory_entities {
+    uuid id PK
+    uuid user_id FK
+    string key "UK(user_id, key), 정규화 이름"
+  }
+  memory_facts {
+    uuid id PK
+    uuid subject_id FK
+    string predicate
+    uuid object_id FK "또는 value"
+  }
+  memory_fact_sources {
+    uuid fact_id PK
+    uuid conversation_id PK "출처 대화"
+  }
   usage_daily {
     string subject PK "user:id 또는 guest:id"
     date day PK
@@ -380,7 +398,7 @@ erDiagram
 - **사용량 기준값은 `usage_daily`**: 과금 대상 메시지와 같은 트랜잭션에서 UPSERT, 커밋 후 `quota.invalidate`. [ADR](decision-docs/adrs/database-as-source-of-truth-for-quota.md).
 - **결제 멱등**: `payment_events.id` PK + `ON CONFLICT DO NOTHING`.
 
-마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap → `0010` attachments → `0012` attachment status.
+마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap → `0010` attachments → `0012` attachment status → `0013` user memory.
 
 ---
 
