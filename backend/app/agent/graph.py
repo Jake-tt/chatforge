@@ -61,7 +61,8 @@ AGENT_ROUTER_SYSTEM = ROUTER_SYSTEM + (
     "the user knows; then write one short clarifying question in the user's language in "
     f"`clarifying_question`, and up to {CLARIFY_MAX_OPTIONS} likely answers to it in "
     "`clarifying_options` as short phrases the user could tap, not questions. Leave "
-    "`clarifying_options` empty when the answer is open-ended."
+    "`clarifying_options` empty when the answer is open-ended. Don't ask about what is "
+    "already known about the user."
 )
 
 TOOLS_NOTE = """
@@ -208,7 +209,9 @@ async def coordinator(state: AgentState, runtime: Runtime[AgentContext]) -> dict
     )
     if result.grounding is None:
         return {"usage": result.usage}
-    current = dataclasses.replace(turns[-1], context=result.grounding.context)
+    # Added to what the turn already carries (the member's memory), not in its place.
+    context = "\n\n".join(p for p in (turns[-1].context, result.grounding.context) if p)
+    current = dataclasses.replace(turns[-1], context=context)
     return {"turns": [*turns[:-1], current], "usage": result.usage,
             "citations": [c.as_dict() for c in result.grounding.citations]}
 

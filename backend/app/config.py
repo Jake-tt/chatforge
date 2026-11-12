@@ -100,6 +100,8 @@ class Settings(BaseSettings):
     image_description_timeout_seconds: float = 30.0  # per image or scanned page
     ocr_max_pages: int = 10  # a scanned PDF is read this far; the rest is said to be unread
 
+    memory_core_chars: int = 500  # the member's facts put on every turn; the rest by recall
+
     # Recap shown on reopening a conversation that has been quiet this long.
     recap_after_seconds: int = Field(default=3600, ge=0)
     recap_min_messages: int = 4  # shorter conversations are read at a glance
