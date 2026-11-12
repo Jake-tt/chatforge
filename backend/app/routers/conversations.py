@@ -568,6 +568,7 @@ async def _run_agent(job: ReplyJob) -> AsyncIterator[str]:
             {"turns": job.turns, "citations": [], "scratch": [], "tool_rounds": 0,
              "usage": Usage(), "after_clarify": job.after_clarify},
             context=_agent_context(job), stream_mode=["messages", "updates"],
+            config=ctx.tracer.config(session_id=str(job.conversation_id), run_name="chat_turn"),
         )) as graph_events:
             while True:
                 async with asyncio.timeout_at(deadline):

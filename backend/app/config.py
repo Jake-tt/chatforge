@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -103,6 +104,9 @@ class Settings(BaseSettings):
     image_description_timeout_seconds: float = 30.0  # per image or scanned page
     ocr_max_pages: int = 10  # a scanned PDF is read this far; the rest is said to be unread
 
+    # LLM traces to a local Langfuse (dev and evaluation only; refused on Cloud Run).
+    langfuse_enabled: bool = False
+
     memory_core_chars: int = 500  # the member's facts put on every turn; the rest by recall
     # Facts a member shared, pulled from a conversation once it has been quiet this long.
     memory_extraction_seconds: int = Field(default=3600, ge=0)  # 0 turns it off
@@ -176,6 +180,9 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
+        # Traces carry members' conversations: Cloud Run sets K_SERVICE.
+        if self.langfuse_enabled and os.environ.get("K_SERVICE"):
+            raise ValueError("LANGFUSE_ENABLED is for development and evaluation, not Cloud Run")
         if self.web_search_enabled and not self.tavily_api_key:
             raise ValueError("WEB_SEARCH_ENABLED needs TAVILY_API_KEY")
         if self.env == "prod":

@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from redis.asyncio import Redis
 from redis.asyncio.retry import Retry
@@ -19,7 +20,7 @@ from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, memory, payments, usage
 from app.routers.conversations import drain_unfinished_writes
 from app.services.attachments import LocalBlobStore
-from app.services.chat_models import build_chat_model, warm_up_ollama
+from app.services.chat_models import LangChainProvider, build_chat_model, warm_up_ollama
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider, build_provider
 from app.services.quota import QuotaService
@@ -30,6 +31,7 @@ from app.services.suggestions import SuggestionService
 from app.services.tasks import CloudTasksQueue, InlineTaskQueue, TaskQueue
 from app.services.turn_gate import TurnGate
 from app.services.web_search import TavilySearch, WebSearchProvider
+from app.tracing import build_tracer
 
 
 def build_redis(settings: Settings) -> Redis:
@@ -54,6 +56,7 @@ def create_app(
     search: SearchProvider | None = None,
     chat_model: BaseChatModel | None = None,
     web_search: WebSearchProvider | None = None,
+    tracing_handler: BaseCallbackHandler | None = None,
 ) -> FastAPI:
     """App factory. Tests inject settings, fake Redis/LLM/search and a task queue."""
     settings = settings or get_settings()
@@ -70,7 +73,10 @@ def create_app(
         )
         guard = RedisGuard(redis_client, failure_threshold=settings.redis_failure_threshold,
                            cooldown_seconds=settings.redis_cooldown_seconds)
+        tracer = build_tracer(settings, tracing_handler)
         provider = llm or build_provider(settings)
+        if isinstance(provider, LangChainProvider):
+            provider.config = tracer.config  # auxiliary calls outside the answer graph
         rag = _build_rag(settings, provider, search)
         tavily = TavilySearch(settings.tavily_api_key.get_secret_value(),
                               timeout_seconds=settings.web_search_timeout_seconds) \
@@ -96,6 +102,7 @@ def create_app(
             chat_model=chat_model or build_chat_model(settings, purpose="main"),
             agent=build_agent_graph(),
             web_search=(web_search or tavily) if settings.web_search_enabled else None,
+            tracer=tracer,
         )
         # In the background: the server can take requests while the model loads, and a
         # request that arrives first simply waits for the same load.
@@ -112,6 +119,7 @@ def create_app(
                 async with asyncio.timeout(8.0):
                     await drain_unfinished_writes()
             await queue.close()
+            tracer.flush()
             if tavily is not None:
                 await tavily.close()
             if redis is None:
