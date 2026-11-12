@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, AttachmentRef, Citation, Recap } from "../api";
+import { api, ApiError, AttachmentRef, AttachmentStatus, Citation, Recap } from "../api";
+import { waitUntilConverted } from "../attachments";
 import { chipsFor, composerHint } from "../chips";
 import Markdown from "./Markdown";
 import { markCited, shownSources } from "../sources";
@@ -36,6 +37,9 @@ const ERROR_TEXT: Record<string, string> = {
   no_text: "파일에서 글자를 읽지 못했어요. 스캔한 문서는 이미지를 읽을 수 있는 모델에서만 읽어요.",
   unreadable_file: "파일을 읽지 못했어요. 손상되지 않았는지 확인해 주세요.",
   invalid_attachment: "첨부한 파일을 찾지 못했어요. 다시 올려 주세요.",
+  attachment_not_ready: "파일을 아직 읽고 있어요. 잠시 후 보내 주세요.",
+  queue_unavailable: "파일을 처리 대기열에 넣지 못했어요. 다시 올려 주세요.",
+  conversion_timeout: "파일을 읽는 데 너무 오래 걸려요. 다시 올려 주세요.",
 };
 
 // What the file picker offers; the server checks the bytes either way, and refuses images
@@ -48,7 +52,7 @@ export default function ChatPanel(props: Props) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [recap, setRecap] = useState<Recap | null>(null);
-  const [attached, setAttached] = useState<AttachmentRef[]>([]); // uploaded, not yet sent
+  const [attached, setAttached] = useState<AttachmentStatus[]>([]); // uploaded, not yet sent
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -96,8 +100,9 @@ export default function ChatPanel(props: Props) {
     try {
       const conversationId = await props.ensureConversation();
       for (const file of Array.from(files)) {
-        const ref = await api.uploadAttachment(conversationId, file);
-        setAttached((prev) => [...prev, ref]);
+        const accepted = await api.uploadAttachment(conversationId, file);
+        setAttached((prev) => [...prev, accepted]);
+        if (accepted.status === "processing") void follow(conversationId, accepted.id);
       }
     } catch (err) {
       reportError(err);
@@ -107,9 +112,21 @@ export default function ChatPanel(props: Props) {
     }
   };
 
+  // Read in the background: the chip shows it until it's ready, or goes with the reason.
+  const follow = async (conversationId: string, id: string) => {
+    const done = await waitUntilConverted(() => api.getAttachment(conversationId, id));
+    if (done.status === "ready") {
+      setAttached((prev) => prev.map((a) => (a.id === id ? done : a)));
+    } else {
+      setAttached((prev) => prev.filter((a) => a.id !== id));
+      reportError(new ApiError(422, done.error_code ?? "unreadable_file", "File not read"));
+    }
+  };
+  const converting = attached.some((a) => a.status === "processing");
+
   const send = async (text: string) => {
     const content = text.trim();
-    if (!content || streaming || uploading) return;
+    if (!content || streaming || uploading || converting) return;
     const files = attached;
 
     setInput("");
@@ -248,8 +265,9 @@ export default function ChatPanel(props: Props) {
       {(attached.length > 0 || uploading) && (
         <div className="pending-files" aria-label="보낼 첨부 파일">
           {attached.map((a) => (
-            <span key={a.id} className="file">
+            <span key={a.id} className={a.status === "processing" ? "file muted" : "file"}>
               📎 {a.filename}
+              {a.status === "processing" && " · 읽는 중…"}
               <button
                 type="button"
                 className="file-remove"
@@ -306,7 +324,11 @@ export default function ChatPanel(props: Props) {
             중지
           </button>
         ) : (
-          <button type="submit" className="btn btn-primary" disabled={!input.trim() || uploading}>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={!input.trim() || uploading || converting}
+          >
             보내기
           </button>
         )}

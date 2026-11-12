@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Response, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import ColumnElement, and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -22,20 +22,20 @@ from app.deps import Principal, get_ctx, get_principal, get_session
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
 from app.schemas import (
-    AttachmentUploaded,
+    AttachmentStatusOut,
     BulkDeleteOut,
     ConversationCreate,
     ConversationDetail,
     ConversationOut,
     MessageCreate,
 )
-from app.services import memory, summary
+from app.services import attachments, memory, summary
 from app.services.attachments import (
+    accept_upload,
     has_cut_documents,
     images_for_turns,
     render,
     search_attachments,
-    store_upload,
     turn_order,
 )
 from app.services.chat_models import is_retryable
@@ -150,15 +150,22 @@ async def delete_all_conversations(
     return BulkDeleteOut(deleted=result.rowcount)
 
 
-@router.post("/{conversation_id}/attachments", status_code=201,
-             response_model=AttachmentUploaded)
+def _attachment_status(attachment: Attachment) -> AttachmentStatusOut:
+    return AttachmentStatusOut(
+        id=attachment.id, filename=attachment.filename, kind=attachment.kind,
+        status=attachment.status, error_code=attachment.error_code,
+        chars=len(attachment.markdown) if attachment.markdown is not None else None)
+
+
+@router.post("/{conversation_id}/attachments", response_model=AttachmentStatusOut,
+             responses={202: {"description": "Accepted; converted in the background"}})
 async def upload_attachment(
     conversation_id: uuid.UUID,
     file: UploadFile,
     principal: Principal = Depends(get_principal),
     ctx: AppContext = Depends(get_ctx),
     session: AsyncSession = Depends(get_session),
-) -> AttachmentUploaded:
+) -> JSONResponse:
     conversation = await _get_owned(session, principal, conversation_id)
     if await ctx.quota.hit_rate_limit(f"upload:{principal.subject}",
                                       ctx.settings.uploads_per_minute, 60):
@@ -166,15 +173,39 @@ async def upload_attachment(
                        headers={"Retry-After": "60"})
     # One byte over the limit is enough to refuse it without reading the rest.
     data = await file.read(ctx.settings.attachment_max_bytes + 1)
-    attachment, usage = await store_upload(session, ctx.blobs, ctx.llm, ctx.settings,
-                                           conversation, file.filename or "", data)
-    # Describing an image is work the user asked for: charged with the row it produced.
-    await ctx.quota.add_usage(session, principal.subject,
-                              usage.billed(ctx.settings.token_weights()))
+    attachment = await accept_upload(session, ctx.settings, conversation,
+                                     file.filename or "", data)
     await session.commit()
-    await ctx.quota.invalidate(principal.subject)
-    return AttachmentUploaded(id=attachment.id, filename=attachment.filename,
-                              kind=attachment.kind, chars=len(attachment.markdown))
+    if attachment.status == "processing":
+        try:
+            await ctx.tasks.enqueue(attachments.TASK_NAME,
+                                    {"attachment_id": str(attachment.id)})
+        except Exception:
+            # Left "processing" it would never finish: fail it so the user uploads again.
+            log.warning("could not enqueue attachment conversion", exc_info=True)
+            attachment.status, attachment.error_code = "failed", "queue_unavailable"
+            attachment.pending_data = None
+            await session.commit()
+            raise ApiError(503, "queue_unavailable", "The file couldn't be queued, retry") \
+                from None
+    code = 202 if attachment.status == "processing" else 201
+    return JSONResponse(_attachment_status(attachment).model_dump(mode="json"),
+                        status_code=code)
+
+
+@router.get("/{conversation_id}/attachments/{attachment_id}",
+            response_model=AttachmentStatusOut)
+async def get_attachment(
+    conversation_id: uuid.UUID,
+    attachment_id: uuid.UUID,
+    principal: Principal = Depends(get_principal),
+    session: AsyncSession = Depends(get_session),
+) -> AttachmentStatusOut:
+    conversation = await _get_owned(session, principal, conversation_id)
+    attachment = await session.get(Attachment, attachment_id)
+    if attachment is None or attachment.conversation_id != conversation.id:
+        raise ApiError(404, "not_found", "Attachment not found")
+    return _attachment_status(attachment)
 
 
 @router.post("/{conversation_id}/messages")
@@ -262,10 +293,12 @@ async def _unsent_attachments(session: AsyncSession, conversation_id: uuid.UUID,
         return []
     rows = list(await session.scalars(select(Attachment).where(
         Attachment.id.in_(wanted), Attachment.conversation_id == conversation_id,
-        Attachment.message_id.is_(None))))
+        Attachment.message_id.is_(None), Attachment.status != "failed")))
     if len(rows) != len(wanted):
         raise ApiError(400, "invalid_attachment",
                        "An attachment was not found in this conversation or was already sent")
+    if any(a.status != "ready" for a in rows):
+        raise ApiError(409, "attachment_not_ready", "An attachment is still being read")
     return rows
 
 

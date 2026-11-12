@@ -5,7 +5,9 @@ what the model was sent; conversion (MarkItDown) and storage are real.
 """
 
 import io
+import uuid
 import zipfile
+from dataclasses import dataclass
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -75,9 +77,39 @@ async def setup(make_harness, tmp_path):
     return _make
 
 
-async def _upload(h, headers, cid, name: str, data: bytes):
+@dataclass
+class Uploaded:
+    """An upload as it ends up: refused at once, or converted in the background."""
+
+    status_code: int
+    body: dict
+
+    def json(self) -> dict:
+        return self.body
+
+
+# What a background failure would have been had it been refused at upload.
+_FAILED_STATUS = {"no_text": 422, "unreadable_file": 422, "file_too_large": 413,
+                  "llm_unavailable": 502}
+
+
+async def _post(h, headers, cid, name: str, data: bytes):
     return await h.client.post(f"/conversations/{cid}/attachments", headers=headers,
                                files={"file": (name, data, "application/octet-stream")})
+
+
+async def _upload(h, headers, cid, name: str, data: bytes) -> Uploaded:
+    """Upload and let the conversion task run, so tests read the outcome."""
+    r = await _post(h, headers, cid, name, data)
+    if r.status_code != 202:
+        return Uploaded(r.status_code, r.json())
+    await h.ctx.tasks.drain()
+    body = (await h.client.get(f"/conversations/{cid}/attachments/{r.json()['id']}",
+                               headers=headers)).json()
+    if body["status"] == "failed":
+        code = body["error_code"]
+        return Uploaded(_FAILED_STATUS[code], {"detail": {"code": code}})
+    return Uploaded(201, body)
 
 
 async def _send(h, headers, cid, text: str, ids: list[str]):
@@ -91,6 +123,7 @@ async def test_a_document_rides_on_the_turn_that_carries_it(setup):
     up = await _upload(h, headers, cid, "notes.md", "# 회의록\n\n예산은 300만 원".encode())
     assert up.status_code == 201
     assert up.json() | {"id": "x"} == {"id": "x", "filename": "notes.md", "kind": "document",
+                                       "status": "ready", "error_code": None,
                                        "chars": len("# 회의록\n\n예산은 300만 원")}
     assert (await _send(h, headers, cid, "예산이 얼마야?", [up.json()["id"]])).status_code == 200
 
@@ -128,13 +161,13 @@ async def test_pdf_and_docx_files_become_markdown(setup):
 
 async def test_the_same_file_is_converted_only_once(setup, monkeypatch):
     calls: list[str] = []
-    convert = attachments.to_markdown
+    original = attachments.run_isolated
 
-    def counting(data: bytes, extension: str) -> str:
-        calls.append(extension)
-        return convert(data, extension)
+    async def counting(op, params, data, settings, **kwargs):
+        calls.append(params.get("extension", op))
+        return await original(op, params, data, settings, **kwargs)
 
-    monkeypatch.setattr(attachments, "to_markdown", counting)
+    monkeypatch.setattr(attachments, "run_isolated", counting)
     h, model, headers, cid = await setup()
     data = _docx("Launch in March")
 
@@ -389,13 +422,14 @@ async def test_a_single_unread_page_is_named_as_one(setup):
 
 async def test_a_pdf_with_text_is_not_sent_to_the_vision_model(setup, monkeypatch):
     seen: list[int] = []
-    original = attachments.render_pages
+    original = attachments.run_isolated
 
-    def counting(data: bytes, settings, limit: int):
-        seen.append(limit)
-        return original(data, settings, limit)
+    async def counting(op, params, data, settings, **kwargs):
+        if op == "pages":
+            seen.append(params["limit"])
+        return await original(op, params, data, settings, **kwargs)
 
-    monkeypatch.setattr(attachments, "render_pages", counting)
+    monkeypatch.setattr(attachments, "run_isolated", counting)
     h, model, headers, cid = await setup(vision_enabled=True)
 
     up = await _upload(h, headers, cid, "report.pdf", _pdf("Quarterly revenue grew 12%"))
@@ -463,3 +497,116 @@ async def test_attachment_search_stays_within_its_conversation(make_harness, tmp
     await _send(h, headers, cid, "출입 비밀번호가 뭐야?", [mine.json()["id"]])
 
     assert "ZEBRA-42" not in agent.calls[-1]["messages"][-1].content
+
+
+# --- background conversion -------------------------------------------------------------
+
+@pytest.fixture
+async def queued(make_harness, tmp_path):
+    """Cloud Tasks mode with a recording queue: conversions run only when delivered."""
+    from app.routers.internal import verify_task_caller
+    from tests.test_internal_tasks import RecordingQueue
+
+    async def _make(**settings):
+        queue = RecordingQueue()
+        model = RecordingChatModel()
+        h = await make_harness(chat_model=model, attachments_dir=str(tmp_path / "blobs"),
+                               task_backend="cloudtasks", tasks=queue, **settings)
+        h.app.dependency_overrides[verify_task_caller] = lambda: None
+        headers = await h.guest()
+        return h, queue, headers, await h.new_conversation(headers)
+    return _make
+
+
+async def _deliver(h, queue) -> None:
+    for name, payload in queue.enqueued:
+        if name == "convert_attachment":
+            r = await h.client.post(f"/internal/tasks/{name}", json=payload)
+            assert r.status_code == 204
+
+
+async def _status(h, headers, cid, aid) -> dict:
+    return (await h.client.get(f"/conversations/{cid}/attachments/{aid}",
+                               headers=headers)).json()
+
+
+async def test_an_upload_is_answered_at_once_and_read_in_the_background(queued):
+    h, queue, headers, cid = await queued()
+
+    r = await _post(h, headers, cid, "notes.md", b"budget is 3M")
+    assert r.status_code == 202 and r.json()["status"] == "processing"
+    aid = r.json()["id"]
+    early = await _send(h, headers, cid, "읽어줘", [aid])
+    assert (early.status_code, early.json()["detail"]["code"]) == (409, "attachment_not_ready")
+
+    await _deliver(h, queue)
+
+    assert (await _status(h, headers, cid, aid)) | {"id": "x"} == {
+        "id": "x", "filename": "notes.md", "kind": "document", "status": "ready",
+        "chars": 12, "error_code": None}
+    assert (await _send(h, headers, cid, "읽어줘", [aid])).status_code == 200
+
+
+async def test_a_redelivered_conversion_is_applied_and_charged_once(queued):
+    h, queue, headers, cid = await queued(vision_enabled=True)
+    await _post(h, headers, cid, "chart.png", _png())
+
+    await _deliver(h, queue)
+    used = (await h.client.get("/usage", headers=headers)).json()["used"]
+    await _deliver(h, queue)  # at-least-once: the same task again
+
+    assert used > 0  # describing the image was charged...
+    assert (await h.client.get("/usage", headers=headers)).json()["used"] == used  # ...once
+
+
+async def test_a_failed_conversion_says_why_and_cannot_be_sent(queued):
+    h, queue, headers, cid = await queued()  # no vision: a scan can't be read
+    aid = (await _post(h, headers, cid, "scan.pdf", _pdf(None))).json()["id"]
+
+    await _deliver(h, queue)
+
+    status = await _status(h, headers, cid, aid)
+    assert (status["status"], status["error_code"]) == ("failed", "no_text")
+    sent = await _send(h, headers, cid, "읽어줘", [aid])
+    assert (sent.status_code, sent.json()["detail"]["code"]) == (400, "invalid_attachment")
+
+
+async def test_the_uploaded_bytes_are_dropped_once_converted(queued):
+    from app.models import Attachment
+
+    h, queue, headers, cid = await queued()
+    aid = (await _post(h, headers, cid, "notes.md", b"budget")).json()["id"]
+    async with h.ctx.sessionmaker() as session:
+        assert (await session.get(Attachment, uuid.UUID(aid))).pending_data == b"budget"
+
+    await _deliver(h, queue)
+
+    async with h.ctx.sessionmaker() as session:
+        assert (await session.get(Attachment, uuid.UUID(aid))).pending_data is None
+
+
+async def test_an_upload_that_cannot_be_queued_is_refused(make_harness, tmp_path):
+    from tests.test_internal_tasks import RecordingQueue
+
+    class DownQueue(RecordingQueue):
+        async def enqueue(self, name, payload, *, delay_seconds=0):
+            raise ConnectionError("cloud tasks unavailable")
+
+    h = await make_harness(attachments_dir=str(tmp_path), task_backend="cloudtasks",
+                           tasks=DownQueue())
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+
+    r = await _post(h, headers, cid, "notes.md", b"budget")
+
+    assert (r.status_code, r.json()["detail"]["code"]) == (503, "queue_unavailable")
+
+
+async def test_another_conversations_attachment_status_is_not_found(queued):
+    h, queue, headers, cid = await queued()
+    aid = (await _post(h, headers, cid, "notes.md", b"budget")).json()["id"]
+    other = await h.new_conversation(headers)
+
+    r = await h.client.get(f"/conversations/{other}/attachments/{aid}", headers=headers)
+
+    assert r.status_code == 404

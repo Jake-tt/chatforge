@@ -175,7 +175,8 @@ flowchart TB
 | GET / DELETE | `/memory` | 회원의 기억 목록과 켜짐 여부 / 전체 삭제. 게스트는 403 |
 | DELETE | `/memory/{id}` | 기억 항목 삭제 |
 | PUT | `/memory/settings` | 기억 켜기·끄기 |
-| POST | `/conversations/{id}/attachments` | 문서·이미지 업로드(multipart) → 마크다운 변환(이미지는 비전 모델 설명)·저장. 다음 메시지의 `attachment_ids`로 보냄 |
+| POST | `/conversations/{id}/attachments` | 문서·이미지 업로드(multipart). 빠른 검사 후 202(처리 중), 변환은 `convert_attachment` 작업. 같은 파일이 이미 변환돼 있으면 201(준비됨) |
+| GET | `/conversations/{id}/attachments/{aid}` | 첨부 변환 상태(processing·ready·failed와 오류 코드) |
 | DELETE | `/conversations` | 전체 소프트 삭제 |
 | POST | `/conversations/{id}/messages` | **메시지 전송 → SSE 스트림** |
 | GET | `/usage` | 오늘 사용량·한도 |
@@ -397,7 +398,7 @@ erDiagram
 - **사용량 기준값은 `usage_daily`**: 과금 대상 메시지와 같은 트랜잭션에서 UPSERT, 커밋 후 `quota.invalidate`. [ADR](decision-docs/adrs/database-as-source-of-truth-for-quota.md).
 - **결제 멱등**: `payment_events.id` PK + `ON CONFLICT DO NOTHING`.
 
-마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap → `0010` attachments → `0011` user memory.
+마이그레이션 이력: `0001` 초기 스키마 → `0002` 게스트 → `0003` 메시지 seq(expand→backfill→contract) → `0004` citations → `0005` 대화 요약 → `0006` token_version → `0007` payment_events → `0008` message kind·options → `0009` conversation recap → `0010` attachments → `0012` attachment status → `0013` user memory.
 
 ---
 
@@ -425,6 +426,7 @@ erDiagram
 |---|---|---|
 | `generate_title` | `tasks.generate_title` | `title IS NULL`일 때만 UPDATE (사용자 변경 제목 보존) |
 | `summarize_conversation` | `summary.summarize_conversation` | 시작 시점 경계와 같을 때만 요약·경계를 함께 UPDATE |
+| `convert_attachment` | `attachments.convert_attachment` | `processing`일 때만 조건부 UPDATE로 결과·과금을 함께 반영 |
 | `compact_idle_conversation` | `summary.compact_idle_conversation` | 예약 당시 답변이 아직 마지막 메시지이고 되묻기가 아닐 때만, 같은 조건부 UPDATE로 접음 |
 | `purge_user` | `account.purge_user` | 탈퇴 표시된 사용자만, 남은 것만 `PURGE_BATCH_CONVERSATIONS` 단위로 삭제 |
 

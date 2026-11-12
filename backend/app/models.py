@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -148,6 +149,7 @@ class Attachment(Base):
         Index("ix_attachments_conversation_id", "conversation_id"),
         Index("ix_attachments_message_id", "message_id"),
         Index("ix_attachments_sha256", "sha256"),
+        Index("ix_attachments_source_sha256", "source_sha256"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -157,12 +159,19 @@ class Attachment(Base):
     message_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE")
     )
-    kind: Mapped[str] = mapped_column(String(16))  # "document" (images come later)
+    kind: Mapped[str] = mapped_column(String(16))  # "document" or "image"
     mime: Mapped[str] = mapped_column(String(100))
     filename: Mapped[str] = mapped_column(String(255))
     size: Mapped[int] = mapped_column(Integer)
-    sha256: Mapped[str] = mapped_column(String(64))
-    markdown: Mapped[str] = mapped_column(Text)
+    # Converted in the background: "processing" until a task fills in what follows, then
+    # "ready", or "failed" with an error code. The uploaded bytes wait in `pending_data`
+    # (not on a local disk another instance can't see) and are dropped once converted.
+    status: Mapped[str] = mapped_column(String(16), default="ready", server_default="ready")
+    error_code: Mapped[str | None] = mapped_column(String(40))
+    pending_data: Mapped[bytes | None] = mapped_column(LargeBinary)
+    source_sha256: Mapped[str | None] = mapped_column(String(64))  # of the upload, for reuse
+    sha256: Mapped[str | None] = mapped_column(String(64))  # of the stored bytes (blob key)
+    markdown: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
     )
