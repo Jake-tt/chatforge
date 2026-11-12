@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -16,6 +16,7 @@ from app.services.suggestions import SuggestionService
 from app.services.tasks import TaskQueue
 from app.services.turn_gate import TurnGate
 from app.services.web_search import WebSearchProvider
+from app.tracing import Tracer
 
 
 @dataclass
@@ -38,3 +39,4 @@ class AppContext:
     agent: Any  # the compiled LangGraph graph
     blobs: BlobStore  # original bytes of attachments
     web_search: WebSearchProvider | None = None  # set when WEB_SEARCH_ENABLED
+    tracer: Tracer = field(default_factory=Tracer)  # LANGFUSE_ENABLED

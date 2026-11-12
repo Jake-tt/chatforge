@@ -478,7 +478,7 @@ flowchart LR
 
 ### 관측성
 
-[`observability.py`](backend/app/observability.py): Cloud Logging JSON(`severity`, `logging.googleapis.com/trace`), 요청마다 `request_id`를 contextvars로 SSE·백그라운드 로그까지 전파. 순수 ASGI 미들웨어라 스트리밍을 버퍼링하지 않습니다. 라우터 판단·소스별 검색 결과·인용 불일치(`answer cites missing sources`)를 구조화 필드로 남깁니다.
+[`observability.py`](backend/app/observability.py): Cloud Logging JSON(`severity`, `logging.googleapis.com/trace`), 요청마다 `request_id`를 contextvars로 SSE·백그라운드 로그까지 전파. 순수 ASGI 미들웨어라 스트리밍을 버퍼링하지 않습니다. 라우터 판단·소스별 검색 결과·인용 불일치(`answer cites missing sources`)를 구조화 필드로 남깁니다. 개발·평가에서는 [`tracing.py`](backend/app/tracing.py)로 LLM 트레이스를 로컬 Langfuse에 보낼 수 있습니다(`LANGFUSE_ENABLED`, 운영 차단).
 
 ---
 
@@ -511,6 +511,7 @@ flowchart LR
 | `PAST_SEARCH_ENABLED` | 끄면 지난 대화 검색 제외 |
 | `SUMMARY_ENABLED` | 끄면 긴 대화 요약 작업 중지 |
 | `SUGGESTIONS_ENABLED` | 끄면 추천 질문 생성 안 함(`AppContext.suggestions = None`) |
+| `LANGFUSE_ENABLED` | 켜면 답변 그래프와 보조 호출에 Langfuse 콜백(`AppContext.tracer`). 개발·평가 전용, Cloud Run에서는 시작 거부. `pip install .[observability]` 필요 |
 | `PAYMENT_WEBHOOK_SECRET` | 설정하면 `/webhooks/payments` 마운트 |
 | `AGENT_MAX_TOOL_ROUNDS` / `AGENT_MAX_TOOL_CALLS` | 턴당 도구 라운드·라운드당 호출 상한 |
 | `MAX_CONCURRENT_STREAMS` | 사용자별 동시 턴 수 상한 |

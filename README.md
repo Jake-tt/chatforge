@@ -195,6 +195,7 @@ router ─▶ master_router ─┬─▶ clarify ─▶ END
 - Cloud Logging이 파싱하는 JSON 한 줄 로그를 씁니다. `severity`로 로그 레벨을, `logging.googleapis.com/trace`로 Cloud Trace를 연결합니다.
 - 요청마다 `request_id`를 부여하고, 이 값을 contextvars로 SSE 스트림과 백그라운드 작업 로그까지 전파합니다. 응답을 버퍼링하지 않는 순수 ASGI 미들웨어라서 스트리밍을 방해하지 않습니다.
 - 에이전트 router는 판단 결과(라우팅 성공 여부, 되묻기, 소스 계획)와 소요 시간을, RAG는 검색 소스별 결과 수·소요 시간·실패 원인(`timeout`, 예외 이름)을 구조화 필드로 남깁니다. 실패한 소스는 traceback과 함께 경고 로그를 남깁니다.
+- **LLM 트레이스는 개발·평가 전용으로** 로컬 Langfuse에 보냅니다([`app/tracing.py`](backend/app/tracing.py), `LANGFUSE_ENABLED`, 기본 끔). 답변 그래프(라우터·에이전트·도구)와 그 밖의 보조 호출(추천 질문·제목·요약·기억 추출)에 같은 LangChain 콜백을 붙이고, 트레이스에 `request_id`와 대화(세션)를 연결합니다. 운영 트레이스에는 회원의 대화와 기억이 담기므로, `ENV=prod`나 Cloud Run(`K_SERVICE`)에서 켜면 설정 검증에서 서버 시작을 거부합니다. SDK의 기본 호스트는 Langfuse Cloud라서, 호스트·키는 `Settings`에서 받아 클라이언트를 직접 만들고 `LANGFUSE_HOST`가 localhost가 아니면 거부합니다. 첨부 이미지(base64)는 트레이스에서 가립니다. 그래프 안의 보조 호출(라우터)은 턴의 run 설정을 물려받아 한 턴이 한 트레이스로 묶입니다. 콜백 오류는 LangChain이 삼키므로 트레이스 백엔드가 죽어도 답변은 나갑니다.
 
 ### 13. 토큰 폐기와 회원 탈퇴
 [`deps.get_principal`](backend/app/deps.py) · [`routers/auth.py`](backend/app/routers/auth.py) · [`services/account.py`](backend/app/services/account.py) · 테스트 [`test_account.py`](backend/tests/test_account.py)

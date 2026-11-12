@@ -12,7 +12,7 @@ Billing reads LangChain's standard `usage_metadata` and maps it onto `Usage`, wh
 """
 
 import logging
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from typing import Any, Literal
 
 import httpx
@@ -31,6 +31,8 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import var_child_runnable_config
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel
 
@@ -257,13 +259,21 @@ class LangChainProvider:
     def __init__(self, aux: BaseChatModel, structured_method: str | None = None):
         self._aux = aux
         self.structured_method = structured_method
+        # The run config of each call: set to `Tracer.config` when tracing is on.
+        self.config: Callable[[], RunnableConfig] = dict
+
+    def _run_config(self) -> RunnableConfig | None:
+        # Inside a run (the router in the answer graph) the call inherits that run's config,
+        # so it is traced within the turn; passing our own would start a separate trace.
+        return None if var_child_runnable_config.get() else self.config()
 
     async def complete(self, system: str, prompt: str,
                        images: Sequence[ImagePart] = ()) -> TextResult:
         content = [*(i.block() for i in images), {"type": "text", "text": prompt}] \
             if images else prompt
         try:
-            message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(content)])
+            message = await self._aux.ainvoke([SystemMessage(system), HumanMessage(content)],
+                                              config=self._run_config())
         except Exception as exc:
             raise LLMError(str(exc), retryable=is_retryable(exc)) from exc
         used = usage_from_message(message)
@@ -277,7 +287,8 @@ class LangChainProvider:
         method = {"method": self.structured_method} if self.structured_method else {}
         runnable = self._aux.with_structured_output(schema, include_raw=True, **method)
         try:
-            out = await runnable.ainvoke([SystemMessage(system), HumanMessage(prompt)])
+            out = await runnable.ainvoke([SystemMessage(system), HumanMessage(prompt)],
+                                         config=self._run_config())
         except Exception as exc:
             raise LLMError(str(exc), retryable=is_retryable(exc)) from exc
         if out["parsed"] is None:
