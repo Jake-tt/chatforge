@@ -1,12 +1,14 @@
 """Search over the user's own earlier conversations ("what did we decide last time?").
 
-Candidates are the latest messages of the owner's most recently active conversations,
-excluding the current one (already in the model's history) and deleted ones. They are
-ranked with the same BM25 as the help center, built per request, so what one request reads
-is bounded: at most the last `messages_per_conversation` seqs of each conversation (fewer
-if a turn was undone), each cut to `message_chars`. A few hundred short messages index in
-well under a millisecond, so no persistent index is needed at this scale. A managed
-full-text or vector index would replace this behind the same function.
+Candidates are the owner's most recently active conversations, excluding the current one
+(already in the model's history) and deleted ones, each read the way the model reads it:
+its summary for the messages folded into it, then the messages after that, at most the
+last `messages_per_conversation` of them, each cut to `message_chars`. So what one search
+reads stays a summary and a short tail per conversation however long it grew, and what
+was folded away is still found through the summary. They are ranked with the same BM25 as
+the help center, built per request: a few hundred short documents index in well under a
+millisecond, so no persistent index is needed at this scale. A managed full-text or vector
+index would replace this behind the same function.
 
 The owner filter comes from the caller (`conversations._owned_by`), so ownership rules live
 in one place and other users' conversations can never be candidates.
@@ -41,16 +43,31 @@ async def search_past_conversations(
         .limit(conversations)
         .scalar_subquery()
     )
-    # The newest seqs of each conversation (message_count is its last seq): an index range
-    # read, so a long conversation costs no more than a short one. Cut in the database too.
+    summaries = await session.execute(
+        select(Conversation.id, Conversation.title,
+               func.substr(Conversation.summary, 1, message_chars))
+        .where(Conversation.id.in_(recent), Conversation.summary.is_not(None),
+               Conversation.summarized_through_seq > 0)
+    )
+    # After the summary boundary, the newest seqs (message_count is the last one): an index
+    # range read. Cut in the database too.
     rows = await session.execute(
         select(Message.conversation_id, Message.seq, Message.role,
                func.substr(Message.content, 1, message_chars), Conversation.title)
         .join(Conversation, Message.conversation_id == Conversation.id)
         .where(Message.conversation_id.in_(recent),
+               Message.seq > Conversation.summarized_through_seq,
                Message.seq > Conversation.message_count - messages_per_conversation)
     )
     documents = [
+        Document(
+            id=f"{conversation_id}#summary",
+            title=f"지난 대화 › {title or '제목 없음'}",
+            url=f"/conversations/{conversation_id}",
+            text=f"요약: {summary}",
+        )
+        for conversation_id, title, summary in summaries
+    ] + [
         Document(
             id=f"{conversation_id}#{seq}",
             title=f"지난 대화 › {title or '제목 없음'}",
