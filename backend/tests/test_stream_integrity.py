@@ -18,6 +18,7 @@ from app.models import Conversation, Message
 from app.routers.conversations import ReplyJob, _stream_agent_reply, _survive_cancellation
 from app.services.chat_models import LangChainProvider
 from app.services.llm import ChatTurn, FakeProvider
+from app.services.suggestions import FollowUps
 from app.services.turn_gate import Lease, TurnGate
 from tests.fakes import ScriptedChatModel
 from tests.test_agent import _agent_harness, _answer, _route
@@ -258,3 +259,74 @@ async def test_shutdown_waits_for_writes_still_in_flight(make_settings):
     await lifespan.__aexit__(None, None, None)
 
     assert saved == [True]
+
+
+# A disconnect after the whole answer was shown, while the turn finishes: the answer
+# must be stored and charged, or the last delta is a free reply (audit A1).
+
+class BlocksOnSuggestions:
+    """Routes with the scripted router; the follow-up suggestions call never returns."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    async def structured(self, system, prompt, schema):
+        if schema is FollowUps:
+            await asyncio.Event().wait()
+        return await self._inner.structured(system, prompt, schema)
+
+    async def complete(self, system, prompt, images=()):
+        return await self._inner.complete(system, prompt, images)
+
+
+async def _member_turn(make_harness, routes: list, agent: list):
+    router = ScriptedChatModel(script=routes)
+    h = await make_harness(llm=BlocksOnSuggestions(LangChainProvider(router)),
+                           chat_model=ScriptedChatModel(script=agent),
+                           rag_enabled=True, grounding_char_budget=100_000,
+                           suggestions_enabled=True, suggestions_timeout_seconds=60,
+                           tasks=RecordingQueue())
+    headers = await h.guest()
+    cid = await h.new_conversation(headers)
+    me = (await h.client.get("/auth/me", headers=headers)).json()
+    conversation_id = uuid.UUID(cid)
+    async with h.ctx.sessionmaker() as session:  # the user turn, as send_message stores it
+        session.add(Message(conversation_id=conversation_id, seq=1, role="user",
+                            content="질문"))
+        await session.execute(update(Conversation)
+                              .where(Conversation.id == conversation_id)
+                              .values(message_count=1))
+        await session.commit()
+    job = ReplyJob(h.ctx, Principal("guest", uuid.UUID(me["id"]), "guest"), conversation_id,
+                   h.ctx.settings.system_prompt, [ChatTurn("user", "질문")], "질문", True,
+                   None, None, user_seq=1)
+    return h, headers, cid, job
+
+
+async def test_a_disconnect_while_suggestions_are_made_still_stores_and_bills(make_harness):
+    h, headers, cid, job = await _member_turn(make_harness, [_route()], [_answer("다 보인 답변")])
+    stream = _stream_agent_reply(job)
+    shown = []
+    with pytest.raises(TimeoutError):
+        while True:  # until the stream stalls on the suggestions call
+            shown.append(await asyncio.wait_for(anext(stream), 1))
+    # wait_for cancelled the pending step, as Starlette does when the client goes away.
+
+    deltas = [json.loads(e.split("data: ", 1)[1]) for e in shown if e.startswith("event: delta")]
+    assert "".join(d["text"] for d in deltas) == "다 보인 답변"  # all of it reached the client
+    assert await _messages(h, headers, cid) == [("user", "질문"), ("assistant", "다 보인 답변")]
+    assert await _used(h, headers) > 0
+
+
+async def test_a_disconnect_at_the_clarify_event_still_stores_the_question(make_harness):
+    question = "어떤 요금제를 말씀하시나요?"
+    h, headers, cid, job = await _member_turn(
+        make_harness, [_route(needs_clarification=True, clarifying_question=question,
+                              clarifying_options=["프로", "팀"])], [])
+    stream = _stream_agent_reply(job)
+    async for event in stream:
+        if event.startswith("event: clarify"):
+            break
+    await stream.aclose()  # the client went away while the options were being sent
+
+    assert await _messages(h, headers, cid) == [("user", "질문"), ("assistant", question)]

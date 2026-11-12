@@ -3,7 +3,7 @@ import dataclasses
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -460,11 +460,19 @@ class ReplyJob:
 _UNFINISHED_WRITES: set[asyncio.Task] = set()
 
 
-async def _survive_cancellation(coro) -> None:
+async def _survive_cancellation[T](coro: Awaitable[T]) -> T:
     task = asyncio.ensure_future(coro)
     _UNFINISHED_WRITES.add(task)
     task.add_done_callback(_UNFINISHED_WRITES.discard)
-    await asyncio.shield(task)
+    return await asyncio.shield(task)
+
+
+async def _charge(job: ReplyJob, billed: int) -> None:
+    """Charge tokens spent after the reply was stored (its follow-up suggestions)."""
+    async with job.ctx.sessionmaker() as session:
+        await job.ctx.quota.add_usage(session, job.principal.subject, billed)
+        await session.commit()
+    await job.ctx.quota.invalidate(job.principal.subject)
 
 
 async def drain_unfinished_writes() -> None:
@@ -623,21 +631,22 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
                         followups: bool = True, summarize: bool = True,
                         options: list[str] | None = None,
                         ) -> AsyncIterator[str]:
-    """Suggestions or clarify options, storage and billing, background tasks, then `done`.
+    """Storage and billing, background tasks, clarify options or suggestions, then `done`.
+
+    The answer is stored and charged before anything else is awaited or sent: the client
+    has seen all of it, so a disconnect from here on (while suggestions are made, or an
+    event is written) must not leave it unstored and unbilled. The suggestions' tokens are
+    charged on their own once they're made.
 
     A clarifying turn passes `followups=False, summarize=False` and its `options`:
     suggestions would answer for the user, and summarizing would fold the open question
     away. Its options take the place of suggestions.
     """
     ctx = job.ctx
-    if options is not None:
-        yield _sse("clarify", {"options": options})
-    if _wants_followups(ctx, answer, stop_reason, followups):
-        questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
-        usage += suggestion_usage
-        if questions:
-            yield _sse("suggestions", {"questions": questions})
-    message = await _persist_reply(job, answer, usage, citations, options=options)
+    weights = ctx.settings.token_weights()
+    message = await _survive_cancellation(
+        _persist_reply(job, answer, usage, citations, options=options))
+    billed = usage.billed(weights)
     message_id = message.id if message else None
     if job.is_first_message:
         await ctx.tasks.enqueue("generate_title", {
@@ -664,13 +673,23 @@ async def _finish_reply(job: ReplyJob, turns: list[ChatTurn], answer: str, usage
     if job.memory is not None and message is not None and \
             memory_extraction.wants_extraction(ctx):
         await memory_extraction.schedule(ctx, job.conversation_id, message.seq)
+    if options is not None:
+        yield _sse("clarify", {"options": options})
+    if message is not None and _wants_followups(ctx, answer, stop_reason, followups):
+        questions, suggestion_usage = await ctx.suggestions.generate(turns, answer)
+        if extra := suggestion_usage.billed(weights):
+            await _charge(job, extra)
+        usage += suggestion_usage
+        billed += extra
+        if questions:
+            yield _sse("suggestions", {"questions": questions})
     yield _sse("done", {
         "message_id": str(message_id),
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "cache_read_tokens": usage.cache_read_tokens,
         "cache_write_tokens": usage.cache_write_tokens,
-        "billed_tokens": usage.billed(ctx.settings.token_weights()),
+        "billed_tokens": billed,
         "stop_reason": stop_reason,
         "cited": [c["n"] for c in (message.citations if message else None) or []
                   if c["cited"]],

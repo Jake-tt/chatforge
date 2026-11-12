@@ -213,12 +213,14 @@ sequenceDiagram
   R-->>C: 200 text/event-stream, ": routing"
   R->>A: astream(turns, context=AgentContext, stream_mode=[messages, updates])
   A-->>C: sources / delta …
-  R->>R: suggestions 생성 (clarify 턴은 대신 선택지)
-  R-->>C: suggestions 또는 clarify
   R->>DB: 새 세션: assistant 메시지 + usage_daily UPSERT (한 트랜잭션), COMMIT
   R->>Q: invalidate(subject)
   R->>H: append(assistant)
   R->>T: generate_title (첫 메시지) / summarize (임계 초과) / compact_idle (1시간 뒤)
+  R-->>C: clarify (되묻는 턴의 선택지)
+  R->>R: suggestions 생성 (clarify 턴 제외)
+  R->>DB: 추천 질문 토큰 usage_daily UPSERT, COMMIT
+  R-->>C: suggestions
   R-->>C: done {message_id, tokens, billed_tokens, cited, stop_reason}
   R->>G: release(lease)
 ```
@@ -228,7 +230,7 @@ sequenceDiagram
 | 상황 | 처리 |
 |---|---|
 | LLM 오류 | 보인 부분까지 저장, 추정 토큰 과금, `error {code, retryable}` |
-| 클라이언트 연결 끊김 | `CancelledError` 경로에서 부분 답변 저장·과금. 저장은 `asyncio.shield`로 취소에서 보호 |
+| 클라이언트 연결 끊김 | 답변 도중이면 `CancelledError` 경로에서 부분 답변 저장·과금. 답변이 끝난 뒤(clarify 전송·추천 질문 생성 중)라면 답변은 이미 저장·과금됨. 저장은 `asyncio.shield`로 취소에서 보호 |
 | 아무것도 보이기 전에 종료 | user 메시지를 지우고 `message_count`를 되돌림(같은 질문 재시도·제목 생성 보존) |
 | 헤더 전송 실패로 본문 제너레이터가 시작조차 안 됨 | `TurnResponse.__call__`의 `finally`가 턴을 되돌리고 lease 반납 |
 | 턴 전체 타임아웃 | `AGENT_TURN_TIMEOUT_SECONDS`. Cloud Run 요청 타임아웃(`deploy.sh`의 `--timeout`)보다 짧게 잡아서, 스트림이 잘리는 대신 `error` 이벤트로 끝남 |
@@ -240,9 +242,9 @@ sequenceDiagram
 | `: routing` (주석) | — | 헤더 즉시 플러시 |
 | `sources` | `{citations}` | coordinator·도구가 출처를 붙였을 때 |
 | `delta` | `{text}` | agent 노드의 토큰 (라우터 호출·도구 라운드 서두는 걸러냄) |
-| `suggestions` | `{questions}` | 답변 뒤, 선택 |
-| `clarify` | `{options}` | 되묻는 턴의 답 뒤. 빈 배열이면 자유 입력 |
-| `done` | `{message_id, input/output/cache 토큰, billed_tokens, cited, stop_reason}` | 저장·과금 완료 후 |
+| `suggestions` | `{questions}` | 답변 저장·과금 뒤, 선택 |
+| `clarify` | `{options}` | 되묻는 턴의 답을 저장한 뒤. 빈 배열이면 자유 입력 |
+| `done` | `{message_id, input/output/cache 토큰, billed_tokens, cited, stop_reason}` | 저장·과금 완료 후. 토큰은 추천 질문 몫 포함 |
 | `error` | `{code, message, retryable}` | 스트림 도중 실패 |
 
 POST라서 `EventSource`를 쓰지 못하고, [`frontend/src/sse.ts`](frontend/src/sse.ts)가 `fetch` + `ReadableStream`으로 파싱합니다(멀티바이트 문자 경계 처리).
