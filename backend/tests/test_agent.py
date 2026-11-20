@@ -11,6 +11,7 @@ import uuid
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.agent.graph import AgentRoute
 from app.agent.stream import FALLBACK_ANSWER
 from app.deps import Principal
 from app.routers.conversations import ReplyJob, _stream_agent_reply
@@ -657,3 +658,38 @@ async def test_sources_stored_before_the_check_count_as_cited(make_harness):
     stored = (await h.client.get(f"/conversations/{cid}", headers=headers)).json()
 
     assert stored["messages"][0]["citations"][0]["cited"] is True
+
+
+async def test_the_router_must_fill_every_routing_field(make_harness):
+    # A field with a default is optional in the JSON schema, and a constrained local model
+    # (Ollama's JSON-schema format) closes the object without it: qwen3:8b never asked for
+    # the account or earlier conversations, nor wrote a search query (audit A2 baseline).
+    router = ScriptedChatModel(script=[_route(needs_search=True, query="토큰 한도")])
+    h = await make_harness(llm=LangChainProvider(router),
+                           chat_model=ScriptedChatModel(script=[_answer("답")]),
+                           rag_enabled=True, tasks=RecordingQueue())
+    headers = await h.guest()
+
+    await h.chat(headers, await h.new_conversation(headers), "토큰 한도?")
+
+    [schema] = router.calls[0]["tools"]
+    required = set(schema["function"]["parameters"]["required"])
+    assert {"needs_search", "query", "needs_account", "needs_past",
+            "needs_clarification", "clarifying_question", "clarifying_options"} <= required
+    # The JSON-schema response format (Ollama) is built from the same schema.
+    assert set(AgentRoute.model_json_schema()["required"]) == required
+
+
+async def test_an_overlong_search_query_is_trimmed_not_a_lost_route(make_harness, caplog):
+    # `query` is required now, so models always write it; a hosted model doesn't enforce
+    # the schema's length, and a failed parse would lose the whole route.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="토큰 " * 150)],
+        agent=[_answer("답")])
+
+    with caplog.at_level("INFO", logger="app.agent.graph"):
+        await h.chat(headers, cid, "토큰 한도?")
+
+    [record] = [r for r in caplog.records if r.message == "agent route"]
+    assert record.routed and record.route["needs_search"]
+    assert len(record.plan["query"]) <= 200

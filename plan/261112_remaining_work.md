@@ -25,16 +25,16 @@
 |---|---|---|---|---|
 | 1 | ~~감사 A2 조각 003: 평가 질문 세트 40개~~ | **HITL** | **완료(2026-11-18)**: 40개 사용자 검토, 전부 `reviewed: true`. 멀티턴 10 | `decision-docs/issues/261112-eval-observability/003-eval-cases.md` |
 | 2 | ~~감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기~~ | AFK | **완료(2026-11-20, PR #46)**: `dev/langfuse/`(4.76.0 고정), 평가가 Langfuse 실험으로 올라감. 메모리 기록은 README | `.../004-local-langfuse.md` |
-| 3 | 감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인 | **HITL** | 003 완료로 시작 가능. 로컬 Ollama, 비용 없음 | `.../005-baseline.md` |
+| 3 | ~~감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인~~ | **HITL** | **완료(2026-11-20, PR #48)**: `plan/261120_agent_eval_baseline.md`. 라우터 스키마 버그·측정 버그 수정, Ollama 라우터 타임아웃 16초 | `.../005-baseline.md` |
 | 4 | 기억 그래프 004: 기억 화면 | **HITL** | 화면·문구를 사용자가 확인해야 함 | `decision-docs/issues/261109-user-memory/004-memory-screen.md` |
 | 5 | 감사 A4: 도구 라운드 상한·재시도에서 tools 없이 tool 기록을 보냄 | 확인 | 실제 Claude 호출 1~2회 필요(**비용 승인 후**, 수 센트 수준) | `plan/261106_agent_audit.md` A4 |
-| 6 | 감사 A3·A5·A7 | 혼합 | A2 기준선 수치를 보고 결정(A3 라우터에 요약 전달, A5 지연·호출 수, A7 서두 빈도) | `plan/261106_agent_audit.md` |
+| 6 | 감사 A3·A5 (A7은 닫음) | 혼합 | 기준선에서 먼저 볼 것: 라우터의 계정 오탐(FP 9, 정밀도 0.36)과 불필요한 되묻기(0.14). A3는 멀티턴 일치 5/10, A5는 첫 delta p50 11.7초 중 라우터 약 8초·답 뒤 done까지 4.7초(추천 질문) | `plan/261120_agent_eval_baseline.md` |
 | 7 | PR E: PubMed 도구와 검색 평가 | 진행 중 | PMC 수집 스크립트까지 머지. 에이전트 평가는 A2로 분리됐고, 검색 평가는 같은 틀(`backend/evals/`) 재사용 | `plan/261028_hardening_plan.md` |
 | 8 | 첨부 후속 (§2) | 혼합 | 항목별 | 이 문서 §2 |
 | 9 | 에이전트·모델 후속 (§3) | 혼합 | 항목별 | 이 문서 §3 |
 | 10 | 브라우저 수동 확인 (§4) | 수동 | 사람이 화면을 봐야 함 | 이 문서 §4 |
 
-감사 항목 현황(`plan/261106_agent_audit.md` 요약 표): A1·A6·A8 수정, A2 진행 중(조각 001~004 완료), A3·A4·A5·A7 미착수, A9는 A2와 함께.
+감사 항목 현황(`plan/261106_agent_audit.md` 요약 표): A1·A6·A8 수정, A2 완료(기준선 `plan/261120_agent_eval_baseline.md`), A7 닫음, A3·A4·A5·A7 미착수, A9는 A2와 함께.
 
 ### 1-1. A2 평가·Langfuse에서 정한 것과 알아둔 것
 
@@ -56,6 +56,8 @@
   - Langfuse 서버 v4(events_only)는 `dataset_run_items.create`만으로 실험을 만들지 않고, 예전 조회 API(`/datasets/.../runs`)도 막혀 있다. 실험은 SDK `run_experiment`로 올리고, 확인은 UI나 ClickHouse `events_full`(`experiment_*` 열)로 한다
   - FastAPI 0.162에는 OTel 계측이 내장돼 있어 요청마다 서버 span을 헤더(`traceparent`) 기준으로 새로 만든다. 프로세스 안에서 부르는 평가라도 트레이스를 이으려면 헤더를 실어야 한다
   - Langfuse와 Ollama를 함께 띄우면 16GB Mac에서 스왑이 6GB까지 는다. 평가 때만 띄운다
+  - httpx `ASGITransport`는 스트리밍 응답을 끝난 뒤에 넘긴다. 첫 delta처럼 스트림 시점을 재는 곳에서는 실제 소켓(uvicorn)으로 띄운다
+  - 구조화 출력 스키마에서 기본값이 있는 필드는 선택 필드가 되고, Ollama(제약 디코딩)는 선택 필드를 채우지 않는다. 모델이 채워야 하는 필드는 required로 보낸다(`DEC-BACKEND-ROUTER-SCHEMA-001`)
 
 ### 1-2. 기억 그래프에서 알아둔 것
 

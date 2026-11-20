@@ -2,7 +2,8 @@
 
     cd backend && LLM_PROVIDER=ollama python -m evals.run_agent_eval [--only help] [--limit 5]
 
-Each case runs through the app's HTTP API in-process (sign up, ask, read the SSE stream)
+Each case runs through the app's HTTP API, served on a local socket (sign up, ask, read
+the SSE stream as it arrives)
 with the configured models, so routing, tools, storage and billing are what production
 runs. Only the case's last message is scored. What a member already has (earlier
 conversations, remembered facts) is put in the database directly: there is no API that
@@ -28,14 +29,18 @@ import argparse
 import asyncio
 import json
 import logging
+import socket
 import time
 import uuid
 from collections import Counter
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
 import fakeredis
 import httpx
+import uvicorn
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseChatModel
 from sqlalchemy import update
@@ -215,6 +220,31 @@ async def _warm_up(client: httpx.AsyncClient) -> None:
     await _ask(client, headers, cid, "안녕하세요")
 
 
+@asynccontextmanager
+async def _served(app) -> AsyncIterator[str]:
+    """The app on a local socket, as the member's browser reaches it.
+
+    httpx's in-process ASGITransport hands a streamed response over only once it has
+    ended, so every delta would arrive with the last and time to first delta would read
+    as the whole turn. The lifespan is the runner's (it seeds the database first)."""
+    # A bounded shutdown: a stream the server never sees end must not hang the run.
+    server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_level="warning",
+                                           access_log=False, timeout_graceful_shutdown=5))
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        serving = asyncio.create_task(server.serve(sockets=[sock]))
+        try:
+            while not server.started:
+                if serving.done():
+                    serving.result()  # raises why it failed to start
+                    raise RuntimeError("the evaluation server stopped before starting")
+                await asyncio.sleep(0.01)
+            yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+        finally:
+            server.should_exit = True
+            await serving
+
+
 async def run_cases(cases: list[EvalCase], settings: Settings, *,
                     llm: LLMProvider | None = None,
                     chat_model: BaseChatModel | None = None,
@@ -237,8 +267,8 @@ async def run_cases(cases: list[EvalCase], settings: Settings, *,
     try:
         async with app.state.ctx.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
-                                     base_url="http://eval") as client:
+        async with _served(app) as base_url, httpx.AsyncClient(
+                base_url=base_url, trust_env=False) as client:
             await _warm_up(client)
 
             async def run(case: EvalCase, trace: dict[str, str]) -> TurnResult:

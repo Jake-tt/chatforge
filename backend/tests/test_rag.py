@@ -205,3 +205,16 @@ async def test_search_outage_answers_without_sources(make_harness):
 ])
 def test_cited_numbers_reads_markers_not_code_or_links(text, numbers):
     assert cited_numbers(text) == numbers
+
+
+def test_a_local_model_gets_a_longer_router_timeout(make_settings, monkeypatch):
+    # qwen3:8b on a 16GB Mac routes in 8s at the median and up to 16s once every routing
+    # field is required (audit A2): with the hosted model's 8s, half the turns lost routing.
+    monkeypatch.delenv("ROUTER_TIMEOUT_SECONDS", raising=False)
+    assert make_settings(llm_provider="ollama").router_timeout_seconds == 16.0
+    assert make_settings(llm_provider="anthropic", anthropic_api_key="k"
+                         ).router_timeout_seconds == 8.0
+    assert make_settings(llm_provider="fake").router_timeout_seconds == 8.0
+    # An explicit setting wins.
+    assert make_settings(llm_provider="ollama", router_timeout_seconds=5
+                         ).router_timeout_seconds == 5

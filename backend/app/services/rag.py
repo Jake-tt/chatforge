@@ -27,8 +27,9 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.config import Settings
 from app.services.llm import ChatTurn, LLMError, LLMProvider, Usage
@@ -79,15 +80,36 @@ _CODE_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 _PLAN_LABELS = {"guest": "게스트", "free": "무료", "pro": "프로"}
 
 
+QUERY_MAX_CHARS = 200
+
+
+def _all_required(schema: dict[str, Any]) -> None:
+    schema["required"] = list(schema.get("properties", {}))
+
+
 class RouteDecision(BaseModel):
+    # Every field is required in the schema the model sees; the defaults stay for code
+    # that builds a route. A constrained local model (Ollama's JSON-schema format) closes
+    # the object after the required fields: with defaults it never set `needs_account` or
+    # `needs_past`, nor wrote `query` (audit A2 baseline). Subclasses inherit this.
+    model_config = ConfigDict(json_schema_extra=_all_required)
+
     needs_search: bool = Field(description="True if the answer needs the knowledge base.")
-    query: str = Field(default="", max_length=200,
+    query: str = Field(default="", max_length=QUERY_MAX_CHARS,
                        description="Standalone search query, or empty for small talk.")
     needs_account: bool = Field(
         default=False, description="True if the answer needs this user's plan or usage.")
     needs_past: bool = Field(
         default=False,
         description="True if the user refers to something from an earlier conversation.")
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _trim_query(cls, value: object) -> object:
+        # Every field is required, so models always write a query, and a hosted model
+        # doesn't enforce the length: a long one is still a query, so trim it rather than
+        # losing the whole route.
+        return value.strip()[:QUERY_MAX_CHARS] if isinstance(value, str) else value
 
     @classmethod
     def fake(cls, prompt: str) -> "RouteDecision":
