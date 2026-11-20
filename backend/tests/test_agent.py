@@ -11,6 +11,7 @@ import uuid
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.agent.graph import AgentRoute
 from app.agent.stream import FALLBACK_ANSWER
 from app.deps import Principal
 from app.routers.conversations import ReplyJob, _stream_agent_reply
@@ -675,3 +676,20 @@ async def test_the_router_must_fill_every_routing_field(make_harness):
     required = set(schema["function"]["parameters"]["required"])
     assert {"needs_search", "query", "needs_account", "needs_past",
             "needs_clarification", "clarifying_question", "clarifying_options"} <= required
+    # The JSON-schema response format (Ollama) is built from the same schema.
+    assert set(AgentRoute.model_json_schema()["required"]) == required
+
+
+async def test_an_overlong_search_query_is_trimmed_not_a_lost_route(make_harness, caplog):
+    # `query` is required now, so models always write it; a hosted model doesn't enforce
+    # the schema's length, and a failed parse would lose the whole route.
+    h, agent, headers, cid = await _agent_harness(
+        make_harness, routes=[_route(needs_search=True, query="토큰 " * 150)],
+        agent=[_answer("답")])
+
+    with caplog.at_level("INFO", logger="app.agent.graph"):
+        await h.chat(headers, cid, "토큰 한도?")
+
+    [record] = [r for r in caplog.records if r.message == "agent route"]
+    assert record.routed and record.route["needs_search"]
+    assert len(record.plan["query"]) <= 200
