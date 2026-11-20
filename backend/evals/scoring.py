@@ -82,15 +82,18 @@ def _stats(values: list[float]) -> dict:
             "p50": _percentile(values, 0.5), "p90": _percentile(values, 0.9)}
 
 
+def _said(r: TurnResult, flag: str) -> bool:
+    if flag == "needs_clarification":
+        return r.clarified
+    return bool(r.predicted and r.predicted[flag])
+
+
 def _routing(results: list[TurnResult]) -> dict:
     routing = {}
     for flag in FLAGS:
         tp = fp = fn = 0
         for r in results:
-            if flag == "needs_clarification":
-                said = r.clarified
-            else:
-                said = bool(r.predicted and r.predicted[flag])
+            said = _said(r, flag)
             want = r.expected[flag]
             tp += said and want
             fp += said and not want
@@ -98,6 +101,21 @@ def _routing(results: list[TurnResult]) -> dict:
         routing[flag] = {"precision": _rate(tp, tp + fp), "recall": _rate(tp, tp + fn),
                          "tp": tp, "fp": fp, "fn": fn}
     return routing
+
+
+def item_scores(r: TurnResult) -> dict[str, float]:
+    """One case's scores, for its trace in Langfuse. A failed case has only `error`;
+    measurements a turn didn't have (no expected facts, no delta) are left out."""
+    if r.error:
+        return {"error": 1}
+    scores: dict[str, float] = {
+        "error": 0, "routing_match": int(all(_said(r, f) == r.expected[f] for f in FLAGS))}
+    if r.fact_total:
+        scores["fact_recall"] = r.fact_hits / r.fact_total
+    scores |= {"llm_calls": r.llm_calls, "billed_tokens": r.billed_tokens}
+    if r.first_delta_ms is not None:
+        scores["first_delta_ms"] = r.first_delta_ms
+    return scores | {"total_ms": r.total_ms}
 
 
 def summarize(results: list[TurnResult]) -> dict:

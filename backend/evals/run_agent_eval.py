@@ -17,6 +17,9 @@ local model's cold start isn't measured as the first case.
 Not in CI: real models are slow and not deterministic. LLM_PROVIDER=anthropic costs money,
 so it needs --allow-cost (the repository rule: estimate and approve first). Results go to
 `evals/results/` (not committed); the summary table is copied into `plan/` by hand.
+With a local Langfuse configured (LANGFUSE_ENABLED and its keys; `dev/langfuse/up.sh`),
+the run also goes up as a Langfuse experiment with each case's trace and scores
+(`evals/langfuse_run.py`).
 """
 
 from __future__ import annotations
@@ -45,6 +48,7 @@ from app.observability import request_id_var
 from app.services import memory
 from app.services.llm import LLMProvider
 from evals.cases import EvalCase, load_cases
+from evals.langfuse_run import LangfuseRun
 from evals.scoring import FLAGS, TurnResult, fact_hits, render_markdown, summarize
 
 CASES = Path(__file__).with_name("agent_cases.jsonl")
@@ -184,7 +188,7 @@ def score_turn(case: EvalCase, turns: list[dict], *, predicted: dict | None,
 
 
 async def _run_case(app, client: httpx.AsyncClient, counter: _CallCounter, routes: _RouteLog,
-                    case: EvalCase) -> TurnResult:
+                    case: EvalCase, trace: dict[str, str]) -> TurnResult:
     signup = await client.post("/auth/signup", json={
         "email": f"eval-{uuid.uuid4().hex[:12]}@example.com", "password": PASSWORD})
     body = signup.json()
@@ -196,7 +200,8 @@ async def _run_case(app, client: httpx.AsyncClient, counter: _CallCounter, route
     rid = ""
     for i, content in enumerate(case.turns):
         rid = f"{case.id}-{i}-{uuid.uuid4().hex[:6]}"
-        turns.append(await _ask(client, {**headers, "X-Request-ID": rid}, cid, content))
+        turns.append(await _ask(client, {**headers, **trace, "X-Request-ID": rid}, cid,
+                                content))
     return score_turn(case, turns, predicted=routes.routes.get(rid),
                       llm_calls=counter.calls[rid])
 
@@ -212,16 +217,19 @@ async def _warm_up(client: httpx.AsyncClient) -> None:
 
 async def run_cases(cases: list[EvalCase], settings: Settings, *,
                     llm: LLMProvider | None = None,
-                    chat_model: BaseChatModel | None = None) -> list[TurnResult]:
-    """Run each case on a fresh app; `llm`/`chat_model` replace the configured models."""
+                    chat_model: BaseChatModel | None = None,
+                    experiment: LangfuseRun | None = None) -> list[TurnResult]:
+    """Run each case on a fresh app; `llm`/`chat_model` replace the configured models.
+    With `experiment`, the run also goes up to Langfuse as a dataset run."""
     counter, routes = _CallCounter(), _RouteLog()
+    handlers = [counter, *([experiment.handler] if experiment and experiment.handler else [])]
     route_logger = logging.getLogger("app.agent.graph")
     route_logger.addHandler(routes)
     previous_level = route_logger.level
     route_logger.setLevel(logging.INFO)
     app = create_app(_eval_settings(settings), redis=fakeredis.FakeAsyncRedis(
         decode_responses=True), llm=llm, tasks=_NoTasks(), chat_model=chat_model,
-        tracing_handler=counter)
+        tracing_handler=handlers)
     lifespan = app.router.lifespan_context(app)
     await lifespan.__aenter__()
     try:
@@ -230,18 +238,21 @@ async def run_cases(cases: list[EvalCase], settings: Settings, *,
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
                                      base_url="http://eval") as client:
             await _warm_up(client)
-            results = []
-            for case in cases:
+
+            async def run(case: EvalCase, trace: dict[str, str]) -> TurnResult:
                 try:
-                    results.append(await _run_case(app, client, counter, routes, case))
+                    return await _run_case(app, client, counter, routes, case, trace)
                 except Exception as exc:  # one broken case shouldn't end the run
-                    results.append(TurnResult(
+                    return TurnResult(
                         case_id=case.id, category=case.category, reviewed=case.reviewed,
                         expected={f: getattr(case.expect, f) for f in FLAGS}, predicted=None,
                         clarified=False, answer="", sources=[], fact_hits=0,
                         fact_total=len(case.expect.facts), llm_calls=0, billed_tokens=0,
-                        first_delta_ms=None, total_ms=0.0, error=repr(exc)))
-            return results
+                        first_delta_ms=None, total_ms=0.0, error=repr(exc))
+
+            if experiment:
+                return await experiment.run(cases, run)
+            return [await run(case, {}) for case in cases]
     finally:
         await lifespan.__aexit__(None, None, None)
         route_logger.removeHandler(routes)
@@ -268,7 +279,11 @@ def main() -> None:
     settings = base.model_copy(update={
         "database_url": f"sqlite+aiosqlite:///{RESULTS / f'{stamp}.db'}"})
 
-    results = asyncio.run(run_cases(cases, settings))
+    # Per-case traces and scores in Langfuse, the summary table here (decision D6).
+    experiment = LangfuseRun.from_settings(base, run_name=f"{base.llm_provider} {stamp}",
+                                           metadata={"provider": base.llm_provider}) \
+        if base.langfuse_enabled else None
+    results = asyncio.run(run_cases(cases, settings, experiment=experiment))
     summary = summarize(results)
     title = f"에이전트 평가 — {base.llm_provider} {stamp}"
     (RESULTS / f"{stamp}.json").write_text(json.dumps(

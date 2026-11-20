@@ -6,13 +6,16 @@ CI (audit A2).
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from pydantic import ValidationError
 
 from evals.cases import EvalCase, load_cases
+from evals.langfuse_run import DATASET, LangfuseRun
 from evals.run_agent_eval import run_cases, score_turn
-from evals.scoring import TurnResult, fact_hits, render_markdown, summarize
+from evals.scoring import TurnResult, fact_hits, item_scores, render_markdown, summarize
 from tests.fakes import RecordingChatModel
 
 FLAGS = ("needs_search", "needs_account", "needs_past", "needs_clarification")
@@ -224,3 +227,122 @@ async def test_a_run_drives_each_case_through_the_api_and_scores_it(make_setting
     summary = summarize(results)
     assert summary["cases"] == 4
     assert "| needs_search |" in render_markdown(summary)
+
+
+# --- a run as a Langfuse dataset run (decision D6) ---------------------------------------
+
+class FakeLangfuse:
+    """Stands in for the Langfuse client (an external service): records what is sent, and
+    runs an experiment the way the SDK does (each item's task inside its own span, then the
+    evaluators on the task's output), off the caller's thread."""
+
+    def __init__(self):
+        self.datasets, self.items, self.experiments = [], [], []
+        self.current: str | None = None  # the item whose span is open
+        self.scores: dict[str, dict] = {}
+        self.flushed = False
+
+    def create_dataset(self, *, name, description=None, metadata=None):
+        self.datasets.append(name)
+
+    def create_dataset_item(self, *, dataset_name, id, input, expected_output, metadata):
+        self.items.append({"dataset": dataset_name, "id": id, "input": input,
+                           "expected": expected_output, "metadata": metadata})
+
+    def get_dataset(self, name):
+        # Langfuse returns items newest first.
+        return SimpleNamespace(items=[SimpleNamespace(id=i["id"]) for i in self.items[::-1]
+                                      if i["dataset"] == name])
+
+    def run_experiment(self, *, name, run_name, data, task, evaluators, max_concurrency,
+                       metadata=None):
+        self.experiments.append({"name": name, "run": run_name, "items": [i.id for i in data],
+                                 "max_concurrency": max_concurrency})
+        for item in data:
+            self.current = item.id
+            output = task(item=item)
+            self.current = None
+            self.scores[item.id] = {e["name"]: e["value"] for ev in evaluators
+                                    for e in ev(input=None, output=output)}
+
+    def flush(self):
+        self.flushed = True
+
+
+class _TurnSpans(BaseCallbackHandler):
+    """The experiment item that was running when each answer turn started."""
+
+    def __init__(self, client: FakeLangfuse):
+        self.client, self.turns = client, []
+
+    def on_chain_start(self, serialized, inputs, *, run_id, parent_run_id=None, name=None,
+                       **kwargs):
+        if parent_run_id is None and name == "chat_turn":
+            self.turns.append(self.client.current)
+
+
+def _two_cases() -> list[EvalCase]:
+    return [EvalCase.model_validate(c) for c in (
+        _case(),
+        _case(id="memory-1", category="memory", turns=["나 뭐 좋아해?", "음료는?"],
+              setup={"memory": [{"subject": "나", "predicate": "좋아하는 음료",
+                                 "object": "라떼"}]},
+              expect={"facts": [["라떼"]]}),
+    )]
+
+
+async def test_a_run_goes_up_as_an_experiment_with_each_case_in_its_own_item(make_settings):
+    client = FakeLangfuse()
+    headers_in = []
+    run = LangfuseRun(client, run_name="fake 20261120", handler=_TurnSpans(client),
+                      trace_headers=lambda: headers_in.append(client.current) or {})
+
+    results = await run_cases(_two_cases(), make_settings(), experiment=run)
+
+    assert [r.case_id for r in results] == ["help-1", "memory-1"]
+    assert all(r.error is None and r.llm_calls >= 1 for r in results)  # still counted
+    # The cases are the dataset's items, upserted under ids of their own.
+    ids = [f"{DATASET}:help-1", f"{DATASET}:memory-1"]
+    assert client.datasets == [DATASET] and [i["id"] for i in client.items] == ids
+    assert client.items[1]["input"]["turns"] == ["나 뭐 좋아해?", "음료는?"]
+    assert client.items[1]["expected"]["facts"] == [["라떼"]]
+    assert client.items[1]["metadata"] == {"category": "memory", "reviewed": False}
+    # One experiment over them, in the cases' order, one at a time (latency is measured).
+    assert client.experiments == [{"name": DATASET, "run": "fake 20261120", "items": ids,
+                                   "max_concurrency": 1}]
+    # Every turn of a case, the warm-up aside, runs inside that case's item, and the
+    # case's requests carry that item's trace context.
+    assert run.handler.turns == [None, ids[0], ids[1], ids[1]]
+    assert headers_in == ids
+    # Each item is scored from its result.
+    assert client.scores[ids[1]] == item_scores(results[1])
+    assert client.flushed
+
+
+async def test_a_case_the_experiment_never_ran_still_gets_a_result(make_settings):
+    class Skipping(FakeLangfuse):
+        def run_experiment(self, *, data, **kwargs):  # the SDK isolates item failures
+            return super().run_experiment(data=data[1:], **kwargs)
+
+    results = await run_cases(_two_cases(), make_settings(),
+                              experiment=LangfuseRun(Skipping(), run_name="r",
+                                                     trace_headers=dict))
+
+    assert [r.case_id for r in results] == ["help-1", "memory-1"]
+    assert all(r.error is None and r.answer for r in results)
+
+
+def test_item_scores_from_a_result():
+    ok = _result(expected=("needs_search",), predicted=("needs_search",), facts=(1, 2),
+                 calls=4, billed=120, first=300.0, total=900.0)
+    assert item_scores(ok) == {"error": 0, "routing_match": 1, "fact_recall": 0.5,
+                               "llm_calls": 4, "billed_tokens": 120,
+                               "first_delta_ms": 300.0, "total_ms": 900.0}
+    # A failed router predicted nothing; no facts expected means no recall to report.
+    missed = _result(expected=("needs_search",), predicted=None, first=None)
+    assert item_scores(missed) == {"error": 0, "routing_match": 0, "llm_calls": 3,
+                                   "billed_tokens": 100, "total_ms": 1000.0}
+    # An asked-back turn matches when asking back was expected.
+    asked = _result(expected=("needs_clarification",), predicted=(), clarified=True)
+    assert item_scores(asked)["routing_match"] == 1
+    assert item_scores(_result(error="HTTP 500")) == {"error": 1}
