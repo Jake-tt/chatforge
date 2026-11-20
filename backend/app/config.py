@@ -12,6 +12,8 @@ from app.services.llm import TokenWeights
 _DEV_JWT_SECRET = "dev-only-secret-change-me-0123456789"
 
 
+OLLAMA_ROUTER_TIMEOUT_SECONDS = 16.0
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -57,6 +59,7 @@ class Settings(BaseSettings):
     rag_enabled: bool = True
     knowledge_dir: str = str(Path(__file__).resolve().parent.parent / "knowledge")
     search_top_k: int = 4
+    # 8s for a hosted model; ollama defaults to OLLAMA_ROUTER_TIMEOUT_SECONDS (16s) unless set.
     router_timeout_seconds: float = 8.0
     search_timeout_seconds: float = 5.0
     account_context_enabled: bool = True  # cite the user's plan/usage when the router asks
@@ -181,6 +184,15 @@ class Settings(BaseSettings):
     tasks_queue: str = "chatforge-default"
     tasks_service_url: str = ""  # public base URL of this service, used as Cloud Tasks target
     tasks_invoker_sa: str = ""  # service account Cloud Tasks signs OIDC tokens with
+
+    @model_validator(mode="after")
+    def _local_router_timeout(self) -> "Settings":
+        # qwen3:8b on a 16GB Mac routes in about 8s at the median and up to 16s, with
+        # every routing field required (audit A2 baseline); 8s lost half the turns' routing.
+        if self.llm_provider == "ollama" and "router_timeout_seconds" not in \
+                self.model_fields_set:
+            self.router_timeout_seconds = OLLAMA_ROUTER_TIMEOUT_SECONDS
+        return self
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
