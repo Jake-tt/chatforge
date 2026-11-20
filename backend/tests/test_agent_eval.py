@@ -12,6 +12,7 @@ import pytest
 from langchain_core.callbacks import BaseCallbackHandler
 from pydantic import ValidationError
 
+from evals import run_agent_eval
 from evals.cases import EvalCase, load_cases
 from evals.langfuse_run import DATASET, LangfuseRun
 from evals.run_agent_eval import run_cases, score_turn
@@ -291,11 +292,24 @@ def _two_cases() -> list[EvalCase]:
     )]
 
 
-async def test_a_run_goes_up_as_an_experiment_with_each_case_in_its_own_item(make_settings):
+def _sent_trace(monkeypatch) -> list:
+    """The trace marker on each message the runner sends (None: no marker)."""
+    sent, ask = [], run_agent_eval._ask
+
+    async def spy(client, headers, cid, content):
+        sent.append(headers.get("X-Trace-Marker"))
+        return await ask(client, headers, cid, content)
+
+    monkeypatch.setattr(run_agent_eval, "_ask", spy)
+    return sent
+
+
+async def test_a_run_goes_up_as_an_experiment_with_each_case_in_its_own_item(
+        make_settings, monkeypatch):
     client = FakeLangfuse()
-    headers_in = []
+    sent = _sent_trace(monkeypatch)
     run = LangfuseRun(client, run_name="fake 20261120", handler=_TurnSpans(client),
-                      trace_headers=lambda: headers_in.append(client.current) or {})
+                      trace_headers=lambda: {"X-Trace-Marker": client.current})
 
     results = await run_cases(_two_cases(), make_settings(), experiment=run)
 
@@ -310,26 +324,30 @@ async def test_a_run_goes_up_as_an_experiment_with_each_case_in_its_own_item(mak
     # One experiment over them, in the cases' order, one at a time (latency is measured).
     assert client.experiments == [{"name": DATASET, "run": "fake 20261120", "items": ids,
                                    "max_concurrency": 1}]
-    # Every turn of a case, the warm-up aside, runs inside that case's item, and the
-    # case's requests carry that item's trace context.
+    # Every turn of a case, the warm-up aside, runs inside that case's item, and each of
+    # the case's messages carries that item's trace context.
     assert run.handler.turns == [None, ids[0], ids[1], ids[1]]
-    assert headers_in == ids
+    assert sent == [None, ids[0], ids[1], ids[1]]
     # Each item is scored from its result.
     assert client.scores[ids[1]] == item_scores(results[1])
     assert client.flushed
 
 
-async def test_a_case_the_experiment_never_ran_still_gets_a_result(make_settings):
+async def test_a_case_the_experiment_never_ran_still_gets_a_result(make_settings,
+                                                                  monkeypatch):
     class Skipping(FakeLangfuse):
         def run_experiment(self, *, data, **kwargs):  # the SDK isolates item failures
             return super().run_experiment(data=data[1:], **kwargs)
 
-    results = await run_cases(_two_cases(), make_settings(),
-                              experiment=LangfuseRun(Skipping(), run_name="r",
-                                                     trace_headers=dict))
+    client = Skipping()
+    sent = _sent_trace(monkeypatch)
+    results = await run_cases(_two_cases(), make_settings(), experiment=LangfuseRun(
+        client, run_name="r", trace_headers=lambda: {"X-Trace-Marker": client.current}))
 
     assert [r.case_id for r in results] == ["help-1", "memory-1"]
     assert all(r.error is None and r.answer for r in results)
+    # The skipped case runs afterwards, untraced.
+    assert sent == [None, f"{DATASET}:memory-1", f"{DATASET}:memory-1", None]
 
 
 def test_item_scores_from_a_result():
