@@ -24,7 +24,7 @@
 | # | 작업 | 유형 | 준비 상태 | 근거 문서 |
 |---|---|---|---|---|
 | 1 | ~~감사 A2 조각 003: 평가 질문 세트 40개~~ | **HITL** | **완료(2026-11-18)**: 40개 사용자 검토, 전부 `reviewed: true`. 멀티턴 10 | `decision-docs/issues/261112-eval-observability/003-eval-cases.md` |
-| 2 | 감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기 | AFK | 001·002 이후. 16GB Mac 메모리 확인 필요 | `.../004-local-langfuse.md` |
+| 2 | ~~감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기~~ | AFK | **완료(2026-11-20)**: `dev/langfuse/`(4.76.0 고정), 평가가 Langfuse 실험으로 올라감. 메모리 기록은 README | `.../004-local-langfuse.md` |
 | 3 | 감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인 | **HITL** | 003 완료로 시작 가능. 로컬 Ollama, 비용 없음 | `.../005-baseline.md` |
 | 4 | 기억 그래프 004: 기억 화면 | **HITL** | 화면·문구를 사용자가 확인해야 함 | `decision-docs/issues/261109-user-memory/004-memory-screen.md` |
 | 5 | 감사 A4: 도구 라운드 상한·재시도에서 tools 없이 tool 기록을 보냄 | 확인 | 실제 Claude 호출 1~2회 필요(**비용 승인 후**, 수 센트 수준) | `plan/261106_agent_audit.md` A4 |
@@ -34,7 +34,7 @@
 | 9 | 에이전트·모델 후속 (§3) | 혼합 | 항목별 | 이 문서 §3 |
 | 10 | 브라우저 수동 확인 (§4) | 수동 | 사람이 화면을 봐야 함 | 이 문서 §4 |
 
-감사 항목 현황(`plan/261106_agent_audit.md` 요약 표): A1·A6·A8 수정, A2 진행 중(조각 001·002·003 완료), A3·A4·A5·A7 미착수, A9는 A2와 함께.
+감사 항목 현황(`plan/261106_agent_audit.md` 요약 표): A1·A6·A8 수정, A2 진행 중(조각 001~004 완료), A3·A4·A5·A7 미착수, A9는 A2와 함께.
 
 ### 1-1. A2 평가·Langfuse에서 정한 것과 알아둔 것
 
@@ -53,6 +53,9 @@
   - 그래프 안에서 부르는 보조 호출(라우터)이 자기 config를 넘기면 상위 run을 덮어써 트레이스가 쪼개진다. run 안에서는 config를 넘기지 않고 물려받는다(`LangChainProvider._run_config`)
   - 라우팅 채점은 소스 계획이 아니라 **라우터 원래 판단**(`agent route` 로그의 `route`)으로 한다. 계획은 3턴째부터 하이브리드 검색을 더해 오탐을 부풀린다
   - 서버 시작 직후 로컬 모델을 올리는 중에 들어온 첫 요청은 라우터가 타임아웃된다. 평가 실행기는 채점하지 않는 예열 턴을 먼저 돈다
+  - Langfuse 서버 v4(events_only)는 `dataset_run_items.create`만으로 실험을 만들지 않고, 예전 조회 API(`/datasets/.../runs`)도 막혀 있다. 실험은 SDK `run_experiment`로 올리고, 확인은 UI나 ClickHouse `events_full`(`experiment_*` 열)로 한다
+  - FastAPI 0.162에는 OTel 계측이 내장돼 있어 요청마다 서버 span을 헤더(`traceparent`) 기준으로 새로 만든다. 프로세스 안에서 부르는 평가라도 트레이스를 이으려면 헤더를 실어야 한다
+  - Langfuse와 Ollama를 함께 띄우면 16GB Mac에서 스왑이 6GB까지 는다. 평가 때만 띄운다
 
 ### 1-2. 기억 그래프에서 알아둔 것
 
@@ -112,7 +115,7 @@
 
 - 파이썬: `backend/.venv`는 Python 3.12(CI·Dockerfile과 같음). 의존성은 `uv pip install --python .venv/bin/python -e ".[dev]"`로 설치합니다. Langfuse까지 쓰려면 `".[dev,observability]"`. `markitdown`은 3.15를 지원하지 않습니다.
 - 로컬 LLM: `ollama serve` 후 `LLM_PROVIDER=ollama`(qwen3:8b). 서버가 시작할 때 모델을 미리 올립니다(`OLLAMA_KEEP_ALIVE=-1`). Ollama 비용은 없습니다.
-- 로컬 Langfuse(조각 004 이후): `.env`에 `LANGFUSE_ENABLED=true`, `LANGFUSE_HOST=http://localhost:3000`, 로컬 UI에서 만든 키. 16GB Mac에서 Ollama와 메모리를 다투므로 평가할 때만 띄웁니다.
+- 로컬 Langfuse: `dev/langfuse/up.sh`로 띄우고, `backend/.env`에 `LANGFUSE_ENABLED=true`, `LANGFUSE_HOST=http://localhost:3000`, `dev/langfuse/.env`의 두 키. 16GB Mac에서 Ollama와 메모리를 다투므로 평가할 때만 띄웁니다.
 - `LLM_PROVIDER=anthropic`, 클라우드 리소스, `deploy/*.sh`는 비용이 듭니다. 예상 비용을 먼저 알리고 승인을 받습니다(저장소 `CLAUDE.md`).
 - Postgres 확인: SQLite는 외래 키를 검사하지 않아, 실제로 Postgres에서만 드러난 버그가 있었습니다(#30 flush 순서, #25 drain). 마이그레이션, 삭제 경로, 쿼리 조건을 바꾸면 일회용 Postgres로도 돌립니다.
 
