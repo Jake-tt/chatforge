@@ -345,7 +345,7 @@ LLM_PROVIDER=ollama python -m evals.run_agent_eval   # 평가가 Langfuse 실험
 docker compose -f dev/langfuse/docker-compose.yml down      # 다 보면 내리기(-v를 붙이면 트레이스도 삭제)
 ```
 
-[`dev/langfuse/docker-compose.yml`](dev/langfuse/docker-compose.yml)은 Langfuse 공식 compose(v4.76.0)를 버전 고정·로컬 전용으로 줄인 것입니다. UI(3000)와 미디어 업로드(9090)만 127.0.0.1에 열고, Postgres·Redis·ClickHouse는 포트를 열지 않아 위 `docker compose`(5432·6379)와 겹치지 않습니다. 운영 배포(`deploy/`)에는 들어가지 않습니다.
+[`dev/langfuse/docker-compose.yml`](dev/langfuse/docker-compose.yml)은 Langfuse 공식 compose(v4.76.0)를 버전 고정·로컬 전용으로 줄인 것입니다. UI(127.0.0.1:3000)만 열고, MinIO·Postgres·Redis·ClickHouse는 포트를 열지 않아 위 `docker compose`(5432·6379)와 겹치지 않습니다. 운영 배포(`deploy/`)에는 들어가지 않습니다.
 
 메모리(16GB Mac, 2026-11-20 측정): Langfuse 컨테이너 합계 약 3.0GB(web 0.8~1.3GB, ClickHouse 0.9~1.4GB, worker 0.7GB, 나머지 0.2GB), Ollama `qwen3:8b` 6.2GB. 둘을 함께 돌리면 스왑이 1.5GB에서 6GB까지 늘었습니다. 그래서 **평가할 때만 띄우고 끝나면 내립니다.** 스왑은 지연 수치를 부풀리므로, 기준선의 지연·시간은 Langfuse를 끈 실행과 비교해 보고 차이가 크면 끈 실행의 값을 씁니다.
 

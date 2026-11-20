@@ -20,7 +20,7 @@ D1, D6
 - [x] Mac 메모리 사용량을 기록하고, Ollama와 함께 돌릴 때의 주의를 README에 적는다
 
 ## Result (2026-11-20)
-- `dev/langfuse/docker-compose.yml`(Langfuse 4.76.0 고정, AI gateway 제외, UI·미디어만 127.0.0.1) + `dev/langfuse/up.sh`(비밀값·프로젝트 키 생성, headless 초기화).
+- `dev/langfuse/docker-compose.yml`(Langfuse 4.76.0 고정, AI gateway 제외, UI만 127.0.0.1:3000, SDK 미디어 업로드 끔) + `dev/langfuse/up.sh`(비밀값·프로젝트 키 생성, headless 초기화).
 - fake 3건, Ollama 2건(`--only past`)을 올려 ClickHouse에서 확인: 케이스마다 트레이스 1개에 `experiment-item-run` → `experiment-item-task`, 앱의 `chat_turn` → `router`·`agent`·`tools`·`ChatOllama`, 점수(`scores`)가 함께 있음.
 - 구현 중 바뀐 것
   - Langfuse 서버 v4(events_only)는 `dataset_run_items.create`만으로는 실험을 만들지 않는다(요청은 성공하지만 실행이 생기지 않음). 실험은 SDK `run_experiment`가 span에 붙이는 속성으로 인식된다 → `run_experiment`를 작업 스레드에서 돌리고, 케이스는 앱이 있는 루프로 넘긴다.

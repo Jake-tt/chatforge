@@ -10,9 +10,9 @@
 # Based on Langfuse's docker-compose.yml at v4.76.0, trimmed for one machine:
 # - versions pinned (web and worker must match);
 # - the AI gateway is left out (it only serves Langfuse's own playground and in-app agent);
-# - only the UI/API (3000) and the media endpoint the SDK uploads to (9090) are published,
-#   both on 127.0.0.1; Postgres, Redis and ClickHouse stay on the compose network, so they
-#   don't clash with chatforge's own docker-compose.yml (5432, 6379);
+# - only the UI/API is published, on 127.0.0.1:3000. The app turns the SDK's media upload
+#   off (images are masked instead), so MinIO, Postgres, Redis and ClickHouse stay on the
+#   compose network and don't clash with chatforge's own docker-compose.yml (5432, 6379);
 # - telemetry to Langfuse is off; secrets come from .env (not committed), not defaults.
 name: chatforge-langfuse
 
@@ -65,12 +65,17 @@ services:
     depends_on: *depends-on
     ports:
       - 127.0.0.1:3000:3000
+    # So `up -d --wait` returns once the API answers, not when the container starts: spans
+    # sent while it boots are dropped. The server listens on the container's hostname.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$$HOSTNAME:3000/api/public/health || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 5s
     environment:
       <<: *langfuse-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?run up.sh}
-      # The SDK uploads media to this address from the host; the web service reads it inside.
-      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
-      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
       # Headless setup: an organization, a project with known API keys, and a login.
       LANGFUSE_INIT_ORG_ID: chatforge
       LANGFUSE_INIT_ORG_NAME: chatforge
@@ -110,8 +115,6 @@ services:
     environment:
       MINIO_ROOT_USER: minio
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?run up.sh}
-    ports:
-      - 127.0.0.1:9090:9000
     volumes:
       - minio_data:/data
     healthcheck:
