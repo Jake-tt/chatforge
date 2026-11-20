@@ -27,8 +27,9 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import Settings
 from app.services.llm import ChatTurn, LLMError, LLMProvider, Usage
@@ -79,7 +80,17 @@ _CODE_RE = re.compile(r"```.*?```|`[^`\n]*`", re.DOTALL)
 _PLAN_LABELS = {"guest": "게스트", "free": "무료", "pro": "프로"}
 
 
+def _all_required(schema: dict[str, Any]) -> None:
+    schema["required"] = list(schema.get("properties", {}))
+
+
 class RouteDecision(BaseModel):
+    # Every field is required in the schema the model sees; the defaults stay for code
+    # that builds a route. A constrained local model (Ollama's JSON-schema format) closes
+    # the object after the required fields: with defaults it never set `needs_account` or
+    # `needs_past`, nor wrote `query` (audit A2 baseline). Subclasses inherit this.
+    model_config = ConfigDict(json_schema_extra=_all_required)
+
     needs_search: bool = Field(description="True if the answer needs the knowledge base.")
     query: str = Field(default="", max_length=200,
                        description="Standalone search query, or empty for small talk.")
