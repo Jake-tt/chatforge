@@ -13,6 +13,7 @@ tracing backend that is down or slow never fails a reply.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
@@ -73,9 +74,16 @@ def langfuse_client(settings: Settings) -> Langfuse:
     """The Langfuse client for these settings (the SDK keeps one per public key).
 
     Built from Settings, not the SDK's own environment lookup: `.env` values never reach
-    os.environ, and a missing host would fall back to Langfuse Cloud."""
+    os.environ, and a missing host would fall back to Langfuse Cloud.
+
+    Media upload is off: the SDK pulls images out of a span and uploads them before the
+    mask runs, so an image format `mask_images` doesn't know would reach the trace store.
+    Off, the data reaches the mask unchanged. The SDK reads this switch only from the
+    environment, when the client is first created.
+    """
     from langfuse import Langfuse  # optional dependency: pip install .[observability]
 
+    os.environ["LANGFUSE_MEDIA_UPLOAD_ENABLED"] = "false"
     return Langfuse(public_key=settings.langfuse_public_key.get_secret_value(),
                     secret_key=settings.langfuse_secret_key.get_secret_value(),
                     base_url=settings.langfuse_host, mask=mask_images)
