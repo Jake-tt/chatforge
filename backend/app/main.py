@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+from collections.abc import Sequence
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -56,7 +57,7 @@ def create_app(
     search: SearchProvider | None = None,
     chat_model: BaseChatModel | None = None,
     web_search: WebSearchProvider | None = None,
-    tracing_handler: BaseCallbackHandler | None = None,
+    tracing_handler: BaseCallbackHandler | Sequence[BaseCallbackHandler] | None = None,
 ) -> FastAPI:
     """App factory. Tests inject settings, fake Redis/LLM/search and a task queue."""
     settings = settings or get_settings()

@@ -158,3 +158,29 @@ def test_images_are_masked_out_of_traces():
 
 def test_settings_default_to_no_tracing():
     assert Settings.model_fields["langfuse_enabled"].default is False
+
+
+def test_the_langfuse_client_is_local_masked_and_never_uploads_media(monkeypatch,
+                                                                       make_settings):
+    # The SDK pulls images out of a span and uploads them before any mask runs; with
+    # uploads off it hands the data to the mask unchanged. The switch is read from the
+    # environment when the client is created.
+    import os
+    import types
+
+    from app.tracing import langfuse_client
+
+    made = []
+
+    class Langfuse:
+        def __init__(self, **kwargs):
+            made.append({**kwargs, "uploads": os.environ.get("LANGFUSE_MEDIA_UPLOAD_ENABLED")})
+
+    monkeypatch.setitem(sys.modules, "langfuse", types.SimpleNamespace(Langfuse=Langfuse))
+    monkeypatch.delenv("LANGFUSE_MEDIA_UPLOAD_ENABLED", raising=False)
+
+    langfuse_client(make_settings(langfuse_enabled=True, **KEYS))
+
+    [client] = made
+    assert client["base_url"] == "http://localhost:3000" and client["mask"] is mask_images
+    assert client["uploads"] == "false"
