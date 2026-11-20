@@ -14,6 +14,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
+from app.agent.stream import HOLDBACK_CHARS
 from evals import run_agent_eval
 from evals.cases import EvalCase, load_cases
 from evals.langfuse_run import DATASET, LangfuseRun
@@ -377,7 +378,7 @@ class _SlowTail(ScriptedChatModel):
     async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
         async for i, chunk in _enumerate(super()._astream(messages, stop, run_manager,
                                                           **kwargs)):
-            if i == 40:  # past the 80-character holdback: the first words are out
+            if i == HOLDBACK_CHARS // len("단어 ") + 10:  # past the holdback: words are out
                 await asyncio.sleep(0.5)
             yield chunk
 

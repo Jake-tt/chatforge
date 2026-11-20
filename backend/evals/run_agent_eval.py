@@ -227,21 +227,22 @@ async def _served(app) -> AsyncIterator[str]:
     httpx's in-process ASGITransport hands a streamed response over only once it has
     ended, so every delta would arrive with the last and time to first delta would read
     as the whole turn. The lifespan is the runner's (it seeds the database first)."""
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
+    # A bounded shutdown: a stream the server never sees end must not hang the run.
     server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_level="warning",
-                                           access_log=False))
-    serving = asyncio.create_task(server.serve(sockets=[sock]))
-    try:
-        while not server.started:
-            if serving.done():
-                serving.result()  # raises why it failed to start
-            await asyncio.sleep(0.01)
-        yield f"http://127.0.0.1:{sock.getsockname()[1]}"
-    finally:
-        server.should_exit = True
-        await serving
-        sock.close()
+                                           access_log=False, timeout_graceful_shutdown=5))
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        serving = asyncio.create_task(server.serve(sockets=[sock]))
+        try:
+            while not server.started:
+                if serving.done():
+                    serving.result()  # raises why it failed to start
+                    raise RuntimeError("the evaluation server stopped before starting")
+                await asyncio.sleep(0.01)
+            yield f"http://127.0.0.1:{sock.getsockname()[1]}"
+        finally:
+            server.should_exit = True
+            await serving
 
 
 async def run_cases(cases: list[EvalCase], settings: Settings, *,
