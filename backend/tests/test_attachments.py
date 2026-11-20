@@ -8,6 +8,7 @@ import io
 import uuid
 import zipfile
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -268,7 +269,10 @@ async def test_a_turn_that_fails_before_any_answer_frees_its_attachments(make_ha
     assert again.status_code == 200 and "읽었어요" in again.text
 
 
-async def test_uploads_are_rate_limited(setup):
+async def test_uploads_are_rate_limited(setup, monkeypatch):
+    # A fixed one-minute window: three uploads straddling a minute boundary would land in
+    # two windows (failed once in CI), so the clock is held still.
+    monkeypatch.setattr("app.services.quota.time", SimpleNamespace(time=lambda: 1_800_000_000))
     h, model, headers, cid = await setup(uploads_per_minute=2)
 
     codes = [(await _upload(h, headers, cid, f"n{i}.md", b"x%d" % i)).status_code
