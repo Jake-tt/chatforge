@@ -222,7 +222,9 @@ async def run_cases(cases: list[EvalCase], settings: Settings, *,
     """Run each case on a fresh app; `llm`/`chat_model` replace the configured models.
     With `experiment`, the run also goes up to Langfuse as a dataset run."""
     counter, routes = _CallCounter(), _RouteLog()
-    handlers = [counter, *([experiment.handler] if experiment and experiment.handler else [])]
+    handlers: list[BaseCallbackHandler] = [counter]
+    if experiment and experiment.handler:
+        handlers.append(experiment.handler)
     route_logger = logging.getLogger("app.agent.graph")
     route_logger.addHandler(routes)
     previous_level = route_logger.level

@@ -66,11 +66,7 @@ def build_tracer(settings: Settings,
         return Tracer()
     if handler is not None:
         return Tracer([handler] if not isinstance(handler, Sequence) else handler)
-    from langfuse.langchain import CallbackHandler
-
-    client = langfuse_client(settings)
-    public_key = settings.langfuse_public_key.get_secret_value()
-    return Tracer([CallbackHandler(public_key=public_key)], flush=client.flush)
+    return Tracer([langfuse_handler(settings)], flush=langfuse_client(settings).flush)
 
 
 def langfuse_client(settings: Settings) -> Langfuse:
@@ -83,6 +79,14 @@ def langfuse_client(settings: Settings) -> Langfuse:
     return Langfuse(public_key=settings.langfuse_public_key.get_secret_value(),
                     secret_key=settings.langfuse_secret_key.get_secret_value(),
                     base_url=settings.langfuse_host, mask=mask_images)
+
+
+def langfuse_handler(settings: Settings) -> BaseCallbackHandler:
+    """The LangChain handler that sends runs to `langfuse_client(settings)`."""
+    from langfuse.langchain import CallbackHandler
+
+    langfuse_client(settings)  # the handler finds its client by public key
+    return CallbackHandler(public_key=settings.langfuse_public_key.get_secret_value())
 
 
 _DATA_URL = re.compile(r"data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+")

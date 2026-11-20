@@ -56,13 +56,10 @@ class LangfuseRun:
     @classmethod
     def from_settings(cls, settings: Settings, *, run_name: str,
                       metadata: dict[str, str] | None = None) -> LangfuseRun:
-        from langfuse.langchain import CallbackHandler
+        from app.tracing import langfuse_client, langfuse_handler
 
-        from app.tracing import langfuse_client
-
-        client = langfuse_client(settings)
-        handler = CallbackHandler(public_key=settings.langfuse_public_key.get_secret_value())
-        return cls(client, run_name=run_name, handler=handler, metadata=metadata)
+        return cls(langfuse_client(settings), run_name=run_name,
+                   handler=langfuse_handler(settings), metadata=metadata)
 
     @staticmethod
     def item_id(case: EvalCase) -> str:
