@@ -25,7 +25,7 @@
 |---|---|---|---|---|
 | 1 | ~~감사 A2 조각 003: 평가 질문 세트 40개~~ | **HITL** | **완료(2026-11-18)**: 40개 사용자 검토, 전부 `reviewed: true`. 멀티턴 10 | `decision-docs/issues/261112-eval-observability/003-eval-cases.md` |
 | 2 | ~~감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기~~ | AFK | **완료(2026-11-20, PR #46)**: `dev/langfuse/`(4.76.0 고정), 평가가 Langfuse 실험으로 올라감. 메모리 기록은 README | `.../004-local-langfuse.md` |
-| 3 | ~~감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인~~ | **HITL** | **완료(2026-11-20)**: `plan/261120_agent_eval_baseline.md`. 라우터 스키마 버그·측정 버그 수정, Ollama 라우터 타임아웃 16초 | `.../005-baseline.md` |
+| 3 | ~~감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인~~ | **HITL** | **완료(2026-11-20, PR #48)**: `plan/261120_agent_eval_baseline.md`. 라우터 스키마 버그·측정 버그 수정, Ollama 라우터 타임아웃 16초 | `.../005-baseline.md` |
 | 4 | 기억 그래프 004: 기억 화면 | **HITL** | 화면·문구를 사용자가 확인해야 함 | `decision-docs/issues/261109-user-memory/004-memory-screen.md` |
 | 5 | 감사 A4: 도구 라운드 상한·재시도에서 tools 없이 tool 기록을 보냄 | 확인 | 실제 Claude 호출 1~2회 필요(**비용 승인 후**, 수 센트 수준) | `plan/261106_agent_audit.md` A4 |
 | 6 | 감사 A3·A5 (A7은 닫음) | 혼합 | 기준선에서 먼저 볼 것: 라우터의 계정 오탐(FP 9, 정밀도 0.36)과 불필요한 되묻기(0.14). A3는 멀티턴 일치 5/10, A5는 첫 delta p50 11.7초 중 라우터 약 8초·답 뒤 done까지 4.7초(추천 질문) | `plan/261120_agent_eval_baseline.md` |
