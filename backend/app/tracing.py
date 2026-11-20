@@ -14,7 +14,7 @@ tracing backend that is down or slow never fails a reply.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from app.observability import request_id_var
@@ -22,29 +22,30 @@ from app.observability import request_id_var
 if TYPE_CHECKING:
     from langchain_core.callbacks import BaseCallbackHandler
     from langchain_core.runnables import RunnableConfig
+    from langfuse import Langfuse
 
     from app.config import Settings
 
 
 class Tracer:
-    def __init__(self, handler: BaseCallbackHandler | None = None,
+    def __init__(self, handlers: Sequence[BaseCallbackHandler] = (),
                  flush: Callable[[], None] | None = None):
-        self._handler = handler
+        self._handlers = list(handlers)
         self._flush = flush
 
     @property
     def enabled(self) -> bool:
-        return self._handler is not None
+        return bool(self._handlers)
 
     def config(self, *, session_id: str | None = None,
                run_name: str | None = None) -> RunnableConfig:
         """The LangChain run config that traces a call ({} when tracing is off)."""
-        if self._handler is None:
+        if not self._handlers:
             return {}
         metadata: dict[str, Any] = {"request_id": request_id_var.get()}
         if session_id is not None:
             metadata["langfuse_session_id"] = session_id
-        config: RunnableConfig = {"callbacks": [self._handler], "metadata": metadata}
+        config: RunnableConfig = {"callbacks": list(self._handlers), "metadata": metadata}
         if run_name is not None:
             config["run_name"] = run_name
         return config
@@ -55,24 +56,33 @@ class Tracer:
             self._flush()
 
 
-def build_tracer(settings: Settings, handler: BaseCallbackHandler | None = None) -> Tracer:
-    """`handler` stands in for Langfuse's in tests; otherwise it is created from the
-    standard LANGFUSE_* environment (keys and host)."""
+def build_tracer(settings: Settings,
+                 handler: BaseCallbackHandler | Sequence[BaseCallbackHandler] | None = None,
+                 ) -> Tracer:
+    """`handler` (one or several) takes the place of Langfuse's: test recorders, or the
+    evaluation runner's call counter alongside the Langfuse handler it builds itself.
+    Otherwise the Langfuse handler is created from Settings (keys and host)."""
     if not settings.langfuse_enabled:
         return Tracer()
     if handler is not None:
-        return Tracer(handler)
-    # Optional dependency: pip install .[observability]
-    from langfuse import Langfuse
+        return Tracer([handler] if not isinstance(handler, Sequence) else handler)
     from langfuse.langchain import CallbackHandler
 
-    # Built from Settings, not the SDK's own environment lookup: `.env` values never reach
-    # os.environ, and a missing host would fall back to Langfuse Cloud.
+    client = langfuse_client(settings)
     public_key = settings.langfuse_public_key.get_secret_value()
-    client = Langfuse(public_key=public_key,
-                      secret_key=settings.langfuse_secret_key.get_secret_value(),
-                      base_url=settings.langfuse_host, mask=mask_images)
-    return Tracer(CallbackHandler(public_key=public_key), flush=client.flush)
+    return Tracer([CallbackHandler(public_key=public_key)], flush=client.flush)
+
+
+def langfuse_client(settings: Settings) -> Langfuse:
+    """The Langfuse client for these settings (the SDK keeps one per public key).
+
+    Built from Settings, not the SDK's own environment lookup: `.env` values never reach
+    os.environ, and a missing host would fall back to Langfuse Cloud."""
+    from langfuse import Langfuse  # optional dependency: pip install .[observability]
+
+    return Langfuse(public_key=settings.langfuse_public_key.get_secret_value(),
+                    secret_key=settings.langfuse_secret_key.get_secret_value(),
+                    base_url=settings.langfuse_host, mask=mask_images)
 
 
 _DATA_URL = re.compile(r"data:[\w/+.-]+;base64,[A-Za-z0-9+/=]+")
