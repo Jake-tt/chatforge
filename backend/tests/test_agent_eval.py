@@ -5,11 +5,13 @@ hand-checked inputs. The run itself uses fake models: real-model runs are manual
 CI (audit A2).
 """
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from evals import run_agent_eval
@@ -17,7 +19,7 @@ from evals.cases import EvalCase, load_cases
 from evals.langfuse_run import DATASET, LangfuseRun
 from evals.run_agent_eval import run_cases, score_turn
 from evals.scoring import TurnResult, fact_hits, item_scores, render_markdown, summarize
-from tests.fakes import RecordingChatModel
+from tests.fakes import RecordingChatModel, ScriptedChatModel, usage
 
 FLAGS = ("needs_search", "needs_account", "needs_past", "needs_clarification")
 
@@ -364,3 +366,34 @@ def test_item_scores_from_a_result():
     asked = _result(expected=("needs_clarification",), predicted=(), clarified=True)
     assert item_scores(asked)["routing_match"] == 1
     assert item_scores(_result(error="HTTP 500")) == {"error": 1}
+
+
+class _SlowTail(ScriptedChatModel):
+    """A long answer whose second half arrives a while after the first."""
+
+    def fallback(self, messages, n):
+        return AIMessage(" ".join(["단어"] * 60), usage_metadata=usage(10, 60))
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        async for i, chunk in _enumerate(super()._astream(messages, stop, run_manager,
+                                                          **kwargs)):
+            if i == 40:  # past the 80-character holdback: the first words are out
+                await asyncio.sleep(0.5)
+            yield chunk
+
+
+async def _enumerate(chunks):
+    i = 0
+    async for chunk in chunks:
+        yield i, chunk
+        i += 1
+
+
+async def test_time_to_first_delta_is_measured_as_the_member_would_see_it(make_settings):
+    # An in-process transport that hands over the stream only once it has ended would
+    # make the first delta arrive with the last.
+    [result] = await run_cases(_two_cases()[:1], make_settings(), chat_model=_SlowTail())
+
+    assert result.error is None
+    assert result.first_delta_ms is not None
+    assert result.total_ms - result.first_delta_ms >= 400
