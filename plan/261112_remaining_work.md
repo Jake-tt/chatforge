@@ -24,7 +24,7 @@
 | # | 작업 | 유형 | 준비 상태 | 근거 문서 |
 |---|---|---|---|---|
 | 1 | ~~감사 A2 조각 003: 평가 질문 세트 40개~~ | **HITL** | **완료(2026-11-18)**: 40개 사용자 검토, 전부 `reviewed: true`. 멀티턴 10 | `decision-docs/issues/261112-eval-observability/003-eval-cases.md` |
-| 2 | ~~감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기~~ | AFK | **완료(2026-11-20)**: `dev/langfuse/`(4.76.0 고정), 평가가 Langfuse 실험으로 올라감. 메모리 기록은 README | `.../004-local-langfuse.md` |
+| 2 | ~~감사 A2 조각 004: 로컬 Langfuse docker compose, 평가 실행을 데이터셋 실행으로 올리기~~ | AFK | **완료(2026-11-20, PR #46)**: `dev/langfuse/`(4.76.0 고정), 평가가 Langfuse 실험으로 올라감. 메모리 기록은 README | `.../004-local-langfuse.md` |
 | 3 | 감사 A2 조각 005: 기준선 실행과 표본 10건 수기 확인 | **HITL** | 003 완료로 시작 가능. 로컬 Ollama, 비용 없음 | `.../005-baseline.md` |
 | 4 | 기억 그래프 004: 기억 화면 | **HITL** | 화면·문구를 사용자가 확인해야 함 | `decision-docs/issues/261109-user-memory/004-memory-screen.md` |
 | 5 | 감사 A4: 도구 라운드 상한·재시도에서 tools 없이 tool 기록을 보냄 | 확인 | 실제 Claude 호출 1~2회 필요(**비용 승인 후**, 수 센트 수준) | `plan/261106_agent_audit.md` A4 |
