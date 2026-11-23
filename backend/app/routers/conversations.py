@@ -397,7 +397,7 @@ def _attachment_search(ctx: AppContext, conversation_id: uuid.UUID) -> PastSearc
             return await search_attachments(
                 session, conversation_id, query,
                 inline_chars=ctx.settings.attachment_inline_chars,
-                limit=ctx.settings.search_top_k)
+                limit=ctx.settings.search_top_k, cache=ctx.attachment_index)
     return search
 
 
