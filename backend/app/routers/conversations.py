@@ -226,12 +226,12 @@ async def send_message(
     conversation = await _get_owned(session, principal, conversation_id)
     settings = ctx.settings
 
-    if await ctx.quota.hit_rate_limit(f"msg:{principal.subject}", settings.requests_per_minute, 60):
+    quota = await ctx.quota.check_turn(
+        session, f"msg:{principal.subject}", settings.requests_per_minute, 60,
+        principal.subject, settings.daily_token_limit(principal.plan))
+    if quota is None:
         raise ApiError(429, "rate_limited", "Too many messages, slow down",
                        headers={"Retry-After": "60"})
-    quota = await ctx.quota.status(
-        session, principal.subject, settings.daily_token_limit(principal.plan)
-    )
     if quota.exceeded:
         raise ApiError(429, "quota_exceeded", "Daily token limit reached")
 
@@ -258,16 +258,17 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     for attachment in attached:
         attachment.message_id = message.id
     await session.commit()
-    await ctx.history.append(principal.subject, conversation.id, HistoryEntry(
-        seq, "user", body.content,
-        attachments=render(turn_order(attached), settings.attachment_inline_chars)))
-
-    recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
+    entry = HistoryEntry(seq, "user", body.content, attachments=render(
+        turn_order(attached), settings.attachment_inline_chars))
+    recent = await ctx.history.append_and_recent(session, principal.subject, conversation.id,
+                                                 entry)
     boundary = summary.summarized_through(settings, conversation)
     window = [e for e in recent if e.seq > boundary]
     # Images go whole only with the latest few user turns; older ones by description.
-    recent_users = [e.seq for e in window if e.role == "user"][-settings.image_recent_turns:]
-    images = await images_for_turns(session, ctx.blobs, conversation.id, recent_users)
+    recent_users = [e for e in window if e.role == "user"][-settings.image_recent_turns:]
+    # Only turns that carried files can have images: most turns skip the lookup.
+    images = await images_for_turns(session, ctx.blobs, conversation.id,
+                                    [e.seq for e in recent_users if e.attachments])
     turns = _to_turns(window, images)
     after_clarify = _follows_clarify(recent, seq)
     is_first_message = seq == 1 and conversation.title is None
@@ -279,7 +280,7 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
         else None
     files = _attachment_search(ctx, conversation.id) if await has_cut_documents(
         session, conversation.id, settings.attachment_inline_chars) else None
-    remembers = principal.kind == "user" and await memory.is_enabled(session, principal.id)
+    remembers = principal.kind == "user" and principal.memory_enabled
     if remembers:
         # The core facts ride on this turn only (context): the system prompt stays cached.
         core = await memory.core_block(session, principal.id, settings.memory_core_chars)
