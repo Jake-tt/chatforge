@@ -266,8 +266,10 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     boundary = summary.summarized_through(settings, conversation)
     window = [e for e in recent if e.seq > boundary]
     # Images go whole only with the latest few user turns; older ones by description.
-    recent_users = [e.seq for e in window if e.role == "user"][-settings.image_recent_turns:]
-    images = await images_for_turns(session, ctx.blobs, conversation.id, recent_users)
+    recent_users = [e for e in window if e.role == "user"][-settings.image_recent_turns:]
+    # Only turns that carried files can have images: most turns skip the lookup.
+    images = await images_for_turns(session, ctx.blobs, conversation.id,
+                                    [e.seq for e in recent_users if e.attachments])
     turns = _to_turns(window, images)
     after_clarify = _follows_clarify(recent, seq)
     is_first_message = seq == 1 and conversation.title is None
