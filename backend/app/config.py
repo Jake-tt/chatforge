@@ -97,8 +97,8 @@ class Settings(BaseSettings):
     uploads_per_minute: int = 20  # converting a file costs CPU
     # Built search indexes of cut documents, kept per instance (see attachment_index).
     # 10,000 passages is about 45 MB; four 200K-character documents are ~1,250.
-    attachment_index_max_passages: int = 10_000
-    attachment_index_ttl_seconds: float = 15 * 60
+    attachment_index_max_passages: int = Field(default=10_000, gt=0)
+    attachment_index_ttl_seconds: float = Field(default=15 * 60, gt=0)
     # Parsing runs in a child process that is killed past the timeout (see run_isolated).
     convert_timeout_seconds: float = 20.0
     convert_concurrency: int = Field(default=2, ge=1)  # child processes at once, per instance

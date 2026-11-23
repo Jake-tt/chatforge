@@ -8,9 +8,12 @@ documents and reused, per instance, without a database read of the text.
 The key is the sorted ids of the conversation's cut documents: a document cut later makes
 a new key, so a stale index is never served. Entries leave by age (counted from when
 they were built, so a deleted document's text is out of memory within the TTL) and by
-least recent use once the passages held pass the limit.
+least recent use once the passages held pass the limit. A timer drops each entry at
+its TTL, since the key of a deleted document is never read (and checked) again.
 """
 
+import asyncio
+import itertools
 import time
 import uuid
 from collections import OrderedDict
@@ -27,6 +30,7 @@ class _Entry:
     index: BM25Search
     passages: int
     built_at: float
+    serial: int  # tells the timer whether the entry it was set for is still the one held
 
 
 class AttachmentIndexCache:
@@ -37,6 +41,7 @@ class AttachmentIndexCache:
         self._clock = clock
         self._entries: OrderedDict[Key, _Entry] = OrderedDict()
         self._held = 0  # passages across all entries
+        self._serials = itertools.count()
 
     def get(self, key: Key) -> BM25Search | None:
         entry = self._entries.get(key)
@@ -53,10 +58,21 @@ class AttachmentIndexCache:
             return  # it would push out everything else and still not fit
         if key in self._entries:
             self._drop(key)
-        self._entries[key] = _Entry(index, passages, self._clock())
+        entry = _Entry(index, passages, self._clock(), next(self._serials))
+        self._entries[key] = entry
         self._held += passages
         while self._held > self._max_passages:
             self._drop(next(iter(self._entries)))
+        # The timer holds the serial, not the entry: an evicted index is freed at once.
+        asyncio.get_running_loop().call_later(self._ttl, self._expire, key, entry.serial)
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def _expire(self, key: Key, serial: int) -> None:
+        entry = self._entries.get(key)
+        if entry is not None and entry.serial == serial:  # not replaced or evicted since
+            self._drop(key)
 
     def _drop(self, key: Key) -> None:
         self._held -= self._entries.pop(key).passages
