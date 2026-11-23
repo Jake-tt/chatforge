@@ -25,6 +25,8 @@ class Principal:
     id: uuid.UUID
     plan: str  # "guest" | "free" | "pro"
     email: str | None = None
+    # Read with the user row the request already loads, so a turn needn't ask again.
+    memory_enabled: bool = False
 
     @property
     def subject(self) -> str:
@@ -86,7 +88,7 @@ async def get_principal(
         # Checked on every request, so a revocation applies at once, not at expiry.
         if claims.version != user.token_version:
             raise ApiError(401, "token_revoked", "This session was signed out")
-        return Principal("user", user.id, user.plan, user.email)
+        return Principal("user", user.id, user.plan, user.email, user.memory_enabled)
 
     guest = await session.get(Guest, claims.subject_id)
     if guest is None:

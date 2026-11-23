@@ -279,7 +279,7 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
         else None
     files = _attachment_search(ctx, conversation.id) if await has_cut_documents(
         session, conversation.id, settings.attachment_inline_chars) else None
-    remembers = principal.kind == "user" and await memory.is_enabled(session, principal.id)
+    remembers = principal.kind == "user" and principal.memory_enabled
     if remembers:
         # The core facts ride on this turn only (context): the system prompt stays cached.
         core = await memory.core_block(session, principal.id, settings.memory_core_chars)
