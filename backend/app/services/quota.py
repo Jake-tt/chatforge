@@ -119,13 +119,18 @@ class QuotaService:
 
         async def incr(r: Redis) -> int:
             async with r.pipeline(transaction=True) as pipe:
-                pipe.incr(key)
-                pipe.expire(key, window_seconds)
+                self._queue_hit(pipe, key, window_seconds)
                 count, _ = await pipe.execute()
             return count
 
         count = await self._guard.call(incr, 0)  # fail open
         return count > limit
+
+    @staticmethod
+    def _queue_hit(pipe, key: str, window_seconds: int) -> None:
+        """One hit on a fixed-window counter: its result is the count so far (2 results)."""
+        pipe.incr(key)
+        pipe.expire(key, window_seconds)
 
     async def check_turn(self, session: AsyncSession, bucket: str, per_window: int,
                          window_seconds: int, subject: str, daily_limit: int
@@ -134,7 +139,9 @@ class QuotaService:
 
         None when the caller is over the rate limit; the day's usage otherwise. Same
         failure modes as the two apart: the rate limit fails open, a usage miss (or no
-        Redis) reads the database.
+        Redis) reads the database. One difference: in one MULTI, an error on either
+        command fails both, so a usage key of the wrong type would also skip the rate
+        limit for that request (nothing writes another type there).
         """
         day = self.today()
         window_key = self._window_key(bucket, window_seconds)
@@ -142,8 +149,7 @@ class QuotaService:
 
         async def op(r: Redis) -> tuple[int, str | None]:
             async with r.pipeline(transaction=True) as pipe:
-                pipe.incr(window_key)
-                pipe.expire(window_key, window_seconds)
+                self._queue_hit(pipe, window_key, window_seconds)
                 pipe.get(usage_key)
                 count, _, cached = await pipe.execute()
             return count, cached
