@@ -401,13 +401,16 @@ async def images_for_turns(session: AsyncSession, blobs: BlobStore, conversation
     for seq, attachment in rows:
         found.setdefault(seq, []).append(attachment)
     ordered = {seq: turn_order(attachments) for seq, attachments in found.items()}
-    # Storage reads are network calls in production: all of them at once, not in turn.
+    # Each read waits on storage (disk today, maybe remote later): issue them together.
+    # At most image_recent_turns × 4 attachments, so the fan-out stays small.
     wanted = [a for attachments in ordered.values() for a in attachments]
-    data = dict(zip((a.id for a in wanted),
-                    await asyncio.gather(*(blobs.get(a.sha256) for a in wanted)), strict=True))
-    return {seq: tuple(ImagePart(a.mime, data[a.id]) for a in attachments
-                       if data[a.id] is not None)
-            for seq, attachments in ordered.items()}
+    read = await asyncio.gather(*(blobs.get(a.sha256) for a in wanted))
+    data = {a.id: d for a, d in zip(wanted, read, strict=True)}
+    images: dict[int, tuple[ImagePart, ...]] = {}
+    for seq, attachments in ordered.items():
+        images[seq] = tuple(ImagePart(a.mime, d) for a in attachments
+                            if (d := data[a.id]) is not None)
+    return images
 
 
 def render(attachments: list[Attachment], inline_chars: int) -> str:

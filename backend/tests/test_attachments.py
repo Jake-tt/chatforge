@@ -366,7 +366,7 @@ async def test_the_images_of_a_turn_are_read_from_storage_at_once(setup, monkeyp
     in_flight = peak = 0
 
     async def slow_get(key: str) -> bytes | None:
-        # Storage is a network call in production: each read waits a moment.
+        # Each read waits on storage for a moment, as a remote store would.
         nonlocal in_flight, peak
         in_flight += 1
         peak = max(peak, in_flight)
