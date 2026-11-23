@@ -6,6 +6,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from app.config import Settings
+from app.services.attachment_index import AttachmentIndexCache
 from app.services.attachments import BlobStore
 from app.services.history import HistoryCache
 from app.services.llm import LLMProvider
@@ -38,5 +39,6 @@ class AppContext:
     chat_model: BaseChatModel  # the agent's answering model
     agent: Any  # the compiled LangGraph graph
     blobs: BlobStore  # original bytes of attachments
+    attachment_index: AttachmentIndexCache  # built indexes of cut documents, reused
     web_search: WebSearchProvider | None = None  # set when WEB_SEARCH_ENABLED
     tracer: Tracer = field(default_factory=Tracer)  # LANGFUSE_ENABLED

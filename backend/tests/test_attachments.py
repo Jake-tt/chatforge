@@ -527,6 +527,49 @@ async def test_attachment_search_stays_within_its_conversation(make_harness, tmp
     assert "ZEBRA-42" not in agent.calls[-1]["messages"][-1].content
 
 
+async def test_searching_the_same_documents_again_reuses_their_index(
+        make_harness, tmp_path, monkeypatch):
+    from tests.fakes import tool_call
+
+    h, agent, headers = await _agent_setup(make_harness, tmp_path, [
+        tool_call("search_attachments", query="출입 비밀번호"),
+        tool_call("search_attachments", query="부록"), AIMessage("ZEBRA-42예요."),
+        tool_call("search_attachments", query="출입 비밀번호"), AIMessage("네, ZEBRA-42.")])
+    cid = await h.new_conversation(headers)
+    up = await _upload(h, headers, cid, "manual.md",
+                       _long_document("출입 비밀번호는 ZEBRA-42이다."))
+    split = attachments.passages
+    built: list[str] = []
+    monkeypatch.setattr(attachments, "passages",
+                        lambda a: built.append(a.filename) or split(a))
+
+    await _send(h, headers, cid, "출입 비밀번호가 뭐야?", [up.json()["id"]])
+    r = await h.chat(headers, cid, "다시 확인해줘")
+
+    assert "ZEBRA-42" in agent.calls[-1]["messages"][-1].content
+    assert "ZEBRA-42" in r.text
+    assert built == ["manual.md"]  # split and indexed once, for three searches over two turns
+
+
+async def test_a_document_cut_later_is_searched_with_the_earlier_ones(make_harness, tmp_path):
+    from tests.fakes import tool_call
+
+    h, agent, headers = await _agent_setup(make_harness, tmp_path, [
+        tool_call("search_attachments", query="출입 비밀번호"), AIMessage("ZEBRA-42예요."),
+        tool_call("search_attachments", query="주차 층"),
+        tool_call("search_attachments", query="출입 비밀번호"), AIMessage("B2층이에요.")])
+    cid = await h.new_conversation(headers)
+    first = await _upload(h, headers, cid, "manual.md",
+                          _long_document("출입 비밀번호는 ZEBRA-42이다."))
+    await _send(h, headers, cid, "출입 비밀번호가 뭐야?", [first.json()["id"]])
+    second = await _upload(h, headers, cid, "parking.md", _long_document("주차는 B2층이다."))
+
+    await _send(h, headers, cid, "주차는 어디에?", [second.json()["id"]])
+
+    assert "B2층" in agent.calls[-2]["messages"][-1].content  # the new document
+    assert "ZEBRA-42" in agent.calls[-1]["messages"][-1].content  # and the earlier one
+
+
 # --- background conversion -------------------------------------------------------------
 
 @pytest.fixture

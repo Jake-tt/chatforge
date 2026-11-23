@@ -20,6 +20,7 @@ from app.db import create_engine, create_sessionmaker
 from app.observability import RequestContextMiddleware, configure_logging
 from app.routers import auth, conversations, internal, memory, payments, usage
 from app.routers.conversations import drain_unfinished_writes
+from app.services.attachment_index import AttachmentIndexCache
 from app.services.attachments import LocalBlobStore
 from app.services.chat_models import LangChainProvider, build_chat_model, warm_up_ollama
 from app.services.history import HistoryCache
@@ -93,6 +94,8 @@ def create_app(
             history=HistoryCache(guard, settings.history_limit,
                                  settings.attachment_inline_chars),
             blobs=LocalBlobStore(settings.attachments_dir),
+            attachment_index=AttachmentIndexCache(settings.attachment_index_max_passages,
+                                                  settings.attachment_index_ttl_seconds),
             rag=rag,
             suggestions=SuggestionService(provider, settings.suggestions_timeout_seconds)
             if settings.suggestions_enabled else None,

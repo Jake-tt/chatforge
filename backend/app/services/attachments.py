@@ -47,6 +47,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.errors import ApiError
 from app.models import Attachment, Conversation, Message
+from app.services.attachment_index import AttachmentIndexCache
 from app.services.claim import guest_subject, user_subject
 from app.services.convert import MAX_MARKDOWN_CHARS
 from app.services.llm import ImagePart, LLMProvider, Usage
@@ -449,12 +450,28 @@ async def has_cut_documents(session: AsyncSession, conversation_id,
 
 
 async def search_attachments(session: AsyncSession, conversation_id, query: str, *,
-                             inline_chars: int, limit: int) -> list[SearchHit]:
-    """Passages of this conversation's cut documents that match `query`."""
-    rows = await session.scalars(
-        select(Attachment).where(*_cut_documents(conversation_id, inline_chars)))
-    documents = [p for a in rows for p in passages(a)]
-    return await BM25Search(documents).search(query, limit) if documents else []
+                             inline_chars: int, limit: int,
+                             cache: AttachmentIndexCache) -> list[SearchHit]:
+    """Passages of this conversation's cut documents that match `query`.
+
+    Their index is built once and reused from `cache`; only their ids are read when it's
+    there.
+    """
+    key = tuple(sorted(await session.scalars(
+        select(Attachment.id).where(*_cut_documents(conversation_id, inline_chars)))))
+    if not key:
+        return []
+    index = cache.get(key)
+    if index is None:
+        # In key order, so the same documents always make the same index.
+        rows = await session.scalars(
+            select(Attachment).where(Attachment.id.in_(key)).order_by(Attachment.id))
+        documents = [p for a in rows for p in passages(a)]
+        if not documents:  # deleted since the ids were read
+            return []
+        index = BM25Search(documents)
+        cache.put(key, index, passages=len(documents))
+    return await index.search(query, limit)
 
 
 def passages(attachment: Attachment) -> list[Document]:
