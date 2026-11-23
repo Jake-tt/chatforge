@@ -4,6 +4,7 @@ Driven over HTTP. The answering model is a RecordingChatModel, so the tests read
 what the model was sent; conversion (MarkItDown) and storage are real.
 """
 
+import asyncio
 import io
 import uuid
 import zipfile
@@ -355,6 +356,29 @@ async def test_an_image_is_sent_whole_for_three_turns_then_as_its_description(se
     await h.chat(headers, cid, "셋")
     assert _image_blocks(model)[0] == []  # older: its description stands in
     assert "(fake) image" in model.turns()[0][1]
+
+
+async def test_the_images_of_a_turn_are_read_from_storage_at_once(setup, monkeypatch):
+    h, model, headers, cid = await setup(vision_enabled=True)
+    ids = [(await _upload(h, headers, cid, name, _png(color=color))).json()["id"]
+           for name, color in (("a.png", (200, 0, 0)), ("b.png", (0, 0, 200)))]
+    read = h.ctx.blobs.get
+    in_flight = peak = 0
+
+    async def slow_get(key: str) -> bytes | None:
+        # Storage is a network call in production: each read waits a moment.
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return await read(key)
+
+    monkeypatch.setattr(h.ctx.blobs, "get", slow_get)
+    await _send(h, headers, cid, "두 그림 비교해줘", ids)
+
+    assert peak == 2  # both reads waited together, not one after the other
+    assert len(_image_blocks(model)[-1]) == 2
 
 
 async def test_images_are_refused_without_a_vision_model(setup):
