@@ -17,7 +17,9 @@ dependencies = [
     "email-validator>=2.2",
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
-    "redis>=5.2",
+    # Below 8.2: fakeredis 2.40 (the tests' Redis) fails to start against redis 8.2.0
+    # ('method_descriptor' object has no attribute '__closure__'). Lift once it supports it.
+    "redis>=5.2,<8.2",
     # Not imported directly, but the answering model's `fallbacks` parameter needs it:
     # langchain-anthropic alone would allow an SDK that predates it.
     "anthropic>=1.13",
