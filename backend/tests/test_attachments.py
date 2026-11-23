@@ -556,7 +556,8 @@ async def test_a_document_cut_later_is_searched_with_the_earlier_ones(make_harne
 
     h, agent, headers = await _agent_setup(make_harness, tmp_path, [
         tool_call("search_attachments", query="출입 비밀번호"), AIMessage("ZEBRA-42예요."),
-        tool_call("search_attachments", query="주차 층"), AIMessage("B2층이에요.")])
+        tool_call("search_attachments", query="주차 층"),
+        tool_call("search_attachments", query="출입 비밀번호"), AIMessage("B2층이에요.")])
     cid = await h.new_conversation(headers)
     first = await _upload(h, headers, cid, "manual.md",
                           _long_document("출입 비밀번호는 ZEBRA-42이다."))
@@ -565,7 +566,8 @@ async def test_a_document_cut_later_is_searched_with_the_earlier_ones(make_harne
 
     await _send(h, headers, cid, "주차는 어디에?", [second.json()["id"]])
 
-    assert "B2층" in agent.calls[-1]["messages"][-1].content
+    assert "B2층" in agent.calls[-2]["messages"][-1].content  # the new document
+    assert "ZEBRA-42" in agent.calls[-1]["messages"][-1].content  # and the earlier one
 
 
 # --- background conversion -------------------------------------------------------------

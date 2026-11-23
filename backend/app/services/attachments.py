@@ -463,10 +463,11 @@ async def search_attachments(session: AsyncSession, conversation_id, query: str,
         return []
     index = cache.get(key)
     if index is None:
-        rows = {a.id: a for a in await session.scalars(
-            select(Attachment).where(Attachment.id.in_(key)))}
-        documents = [p for i in key if i in rows for p in passages(rows[i])]
-        if not documents:
+        # In key order, so the same documents always make the same index.
+        rows = await session.scalars(
+            select(Attachment).where(Attachment.id.in_(key)).order_by(Attachment.id))
+        documents = [p for a in rows for p in passages(a)]
+        if not documents:  # deleted since the ids were read
             return []
         index = BM25Search(documents)
         cache.put(key, index, passages=len(documents))
