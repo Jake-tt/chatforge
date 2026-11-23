@@ -1,21 +1,10 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
-import { api, ApiError, AttachmentRef, AttachmentStatus, Citation, Recap } from "../api";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { api, ApiError, AttachmentStatus, Recap } from "../api";
 import { waitUntilConverted } from "../attachments";
-import { chipsFor, composerHint } from "../chips";
-import Markdown from "./Markdown";
-import { markCited, shownSources } from "../sources";
-
-interface Bubble {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  pending?: boolean;
-  note?: string;
-  citations?: Citation[] | null;
-  suggestions?: string[];
-  options?: string[] | null; // set on a clarifying question
-  attachments?: AttachmentRef[];
-}
+import { chipHandler, replaceLast } from "../bubbles";
+import { composerHint } from "../chips";
+import BubbleView, { type Bubble } from "./BubbleView";
+import { markCited } from "../sources";
 
 interface Props {
   conversationId: string | null;
@@ -82,8 +71,7 @@ export default function ChatPanel(props: Props) {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [bubbles]);
 
-  const updateLast = (fn: (b: Bubble) => Bubble) =>
-    setBubbles((prev) => [...prev.slice(0, -1), fn(prev[prev.length - 1])]);
+  const updateLast = (fn: (b: Bubble) => Bubble) => setBubbles((prev) => replaceLast(prev, fn));
 
   const reportError = (err: unknown) => {
     const apiErr = err instanceof ApiError ? err : null;
@@ -189,6 +177,12 @@ export default function ChatPanel(props: Props) {
     }
   };
 
+  // The chips' handler stays the same across renders (it calls the latest `send`): a new
+  // one on every keystroke would re-render the latest answer and redraw its diagrams.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const pick = useCallback((text: string) => sendRef.current(text), []);
+
   return (
     <section className="chat">
       <div className="messages">
@@ -218,35 +212,7 @@ export default function ChatPanel(props: Props) {
           </div>
         )}
         {bubbles.map((b, i) => (
-          <div key={b.id} className={`bubble ${b.role}`}>
-            {b.content ? (
-              // Users' messages are shown as typed; answers are Markdown (tables, diagrams).
-              b.role === "assistant" ? <Markdown text={b.content} streaming={!!b.pending} /> : b.content
-            ) : b.pending ? (
-              <span className="typing">●●●</span>
-            ) : null}
-            {b.attachments && b.attachments.length > 0 && (
-              <div className="attached-files">
-                {b.attachments.map((a) => (
-                  <span key={a.id} className="file">
-                    📎 {a.filename}
-                  </span>
-                ))}
-              </div>
-            )}
-            {b.note && <div className="note">{b.note}</div>}
-            {b.citations && b.citations.length > 0 && (
-              <ol className="sources" aria-label="참고한 자료">
-                {shownSources(b.citations).map((c) => (
-                  <li key={c.n} value={c.n} title={c.snippet}>
-                    {c.title}
-                  </li>
-                ))}
-              </ol>
-            )}
-            {/* Only the latest message offers chips; older ones would be stale. */}
-            {i === bubbles.length - 1 && !streaming && <Chips bubble={b} onPick={send} />}
-          </div>
+          <BubbleView key={b.id} bubble={b} onPick={chipHandler(i, bubbles.length, streaming, pick)} />
         ))}
         <div ref={bottomRef} />
       </div>
@@ -334,24 +300,5 @@ export default function ChatPanel(props: Props) {
         )}
       </form>
     </section>
-  );
-}
-
-function Chips({ bubble, onPick }: { bubble: Bubble; onPick: (text: string) => Promise<void> }) {
-  const { kind, items } = chipsFor(bubble);
-  if (items.length === 0) return null;
-  return (
-    <div className="suggestions" aria-label={kind === "answer" ? "답 고르기" : "이어서 물어보기"}>
-      {items.map((q) => (
-        <button
-          key={q}
-          type="button"
-          className={kind === "answer" ? "chip chip-answer" : "chip"}
-          onClick={() => void onPick(q)}
-        >
-          {q}
-        </button>
-      ))}
-    </div>
   );
 }
