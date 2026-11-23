@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, AttachmentStatus, Recap } from "../api";
 import { waitUntilConverted } from "../attachments";
 import { chipHandler, replaceLast } from "../bubbles";
@@ -177,6 +177,12 @@ export default function ChatPanel(props: Props) {
     }
   };
 
+  // The chips' handler stays the same across renders (it calls the latest `send`): a new
+  // one on every keystroke would re-render the latest answer and redraw its diagrams.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const pick = useCallback((text: string) => sendRef.current(text), []);
+
   return (
     <section className="chat">
       <div className="messages">
@@ -206,7 +212,7 @@ export default function ChatPanel(props: Props) {
           </div>
         )}
         {bubbles.map((b, i) => (
-          <BubbleView key={b.id} bubble={b} onPick={chipHandler(i, bubbles.length, streaming, send)} />
+          <BubbleView key={b.id} bubble={b} onPick={chipHandler(i, bubbles.length, streaming, pick)} />
         ))}
         <div ref={bottomRef} />
       </div>
