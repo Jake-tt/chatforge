@@ -226,12 +226,12 @@ async def send_message(
     conversation = await _get_owned(session, principal, conversation_id)
     settings = ctx.settings
 
-    if await ctx.quota.hit_rate_limit(f"msg:{principal.subject}", settings.requests_per_minute, 60):
+    quota = await ctx.quota.check_turn(
+        session, f"msg:{principal.subject}", settings.requests_per_minute, 60,
+        principal.subject, settings.daily_token_limit(principal.plan))
+    if quota is None:
         raise ApiError(429, "rate_limited", "Too many messages, slow down",
                        headers={"Retry-After": "60"})
-    quota = await ctx.quota.status(
-        session, principal.subject, settings.daily_token_limit(principal.plan)
-    )
     if quota.exceeded:
         raise ApiError(429, "quota_exceeded", "Daily token limit reached")
 

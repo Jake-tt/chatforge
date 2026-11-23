@@ -53,7 +53,7 @@ def trips(monkeypatch):
     return log, marks, watch
 
 
-@pytest.mark.parametrize(("who", "budget"), [("guest", 14), ("member", 15)])
+@pytest.mark.parametrize(("who", "budget"), [("guest", 13), ("member", 14)])
 async def test_a_follow_up_turn_starts_streaming_within_its_round_trip_budget(
         make_harness, trips, who, budget):
     log, marks, watch = trips

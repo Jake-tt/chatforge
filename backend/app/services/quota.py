@@ -67,6 +67,11 @@ class QuotaService:
         cached = await self._guard.call(lambda r: r.get(key), None)
         if cached is not None:
             return int(cached)
+        return await self._load_used(session, subject, day)
+
+    async def _load_used(self, session: AsyncSession, subject: str, day: date) -> int:
+        """A cache miss: read the day's usage from the database and cache it."""
+        key = self._usage_key(subject, day)
         used = await self._used_from_db(session, subject, day)
         await self._guard.call(lambda r: r.set(key, used, ex=USAGE_CACHE_TTL_SECONDS), None)
         return used
@@ -121,6 +126,34 @@ class QuotaService:
 
         count = await self._guard.call(incr, 0)  # fail open
         return count > limit
+
+    async def check_turn(self, session: AsyncSession, bucket: str, per_window: int,
+                         window_seconds: int, subject: str, daily_limit: int
+                         ) -> QuotaStatus | None:
+        """`hit_rate_limit` and `status` in one Redis round trip, for the chat turn.
+
+        None when the caller is over the rate limit; the day's usage otherwise. Same
+        failure modes as the two apart: the rate limit fails open, a usage miss (or no
+        Redis) reads the database.
+        """
+        day = self.today()
+        window_key = self._window_key(bucket, window_seconds)
+        usage_key = self._usage_key(subject, day)
+
+        async def op(r: Redis) -> tuple[int, str | None]:
+            async with r.pipeline(transaction=True) as pipe:
+                pipe.incr(window_key)
+                pipe.expire(window_key, window_seconds)
+                pipe.get(usage_key)
+                count, _, cached = await pipe.execute()
+            return count, cached
+
+        count, cached = await self._guard.call(op, (0, None))
+        if count > per_window:
+            return None
+        used = int(cached) if cached is not None else \
+            await self._load_used(session, subject, day)
+        return QuotaStatus(used, daily_limit, self._resets_at(day))
 
     async def take_daily(self, bucket: str, limit: int) -> bool:
         """Count one use of a daily allowance (resets with the token quota); False once
