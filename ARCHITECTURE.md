@@ -209,7 +209,7 @@ sequenceDiagram
   Note over R,Q: 초과 시 여기서 HTTP 429 (스트림 열기 전)
   R->>G: acquire(subject, conversation) — 동시 턴이면 409
   R->>DB: _allocate_seq + user 메시지 INSERT, COMMIT
-  R->>H: append(user) → recent() (seq 연속성 검사, 깨지면 DB 재구성)
+  R->>H: append_and_recent(user) (한 pipeline, seq 연속성 검사, 깨지면 DB 재구성)
   R-->>C: 200 text/event-stream, ": routing"
   R->>A: astream(turns, context=AgentContext, stream_mode=[messages, updates])
   A-->>C: sources / delta …

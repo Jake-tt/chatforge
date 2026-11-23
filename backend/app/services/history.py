@@ -65,17 +65,10 @@ class HistoryCache:
     def key(owner: str, conversation_id: uuid.UUID) -> str:
         return f"history:{owner}:{conversation_id}"
 
-    async def recent(
-        self, session: AsyncSession, owner: str, conversation_id: uuid.UUID, latest_seq: int
-    ) -> list[HistoryEntry]:
-        key = self.key(owner, conversation_id)
-        raw = await self._guard.call(lambda r: r.lrange(key, 0, -1), [])
-        return await self._complete(session, key, conversation_id, raw, latest_seq)
-
     async def append_and_recent(self, session: AsyncSession, owner: str,
                                 conversation_id: uuid.UUID, entry: HistoryEntry
                                 ) -> list[HistoryEntry]:
-        """`append` then `recent` up to `entry`, in one Redis round trip."""
+        """`append` then the recent history up to `entry`, in one Redis round trip."""
         key = self.key(owner, conversation_id)
 
         async def op(r: Redis) -> list[str]:
