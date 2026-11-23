@@ -258,11 +258,10 @@ async def _start_turn(ctx: AppContext, principal: Principal, conversation: Conve
     for attachment in attached:
         attachment.message_id = message.id
     await session.commit()
-    await ctx.history.append(principal.subject, conversation.id, HistoryEntry(
-        seq, "user", body.content,
-        attachments=render(turn_order(attached), settings.attachment_inline_chars)))
-
-    recent = await ctx.history.recent(session, principal.subject, conversation.id, seq)
+    entry = HistoryEntry(seq, "user", body.content, attachments=render(
+        turn_order(attached), settings.attachment_inline_chars))
+    recent = await ctx.history.append_and_recent(session, principal.subject, conversation.id,
+                                                 entry)
     boundary = summary.summarized_through(settings, conversation)
     window = [e for e in recent if e.seq > boundary]
     # Images go whole only with the latest few user turns; older ones by description.

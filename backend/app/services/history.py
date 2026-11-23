@@ -70,6 +70,27 @@ class HistoryCache:
     ) -> list[HistoryEntry]:
         key = self.key(owner, conversation_id)
         raw = await self._guard.call(lambda r: r.lrange(key, 0, -1), [])
+        return await self._complete(session, key, conversation_id, raw, latest_seq)
+
+    async def append_and_recent(self, session: AsyncSession, owner: str,
+                                conversation_id: uuid.UUID, entry: HistoryEntry
+                                ) -> list[HistoryEntry]:
+        """`append` then `recent` up to `entry`, in one Redis round trip."""
+        key = self.key(owner, conversation_id)
+
+        async def op(r: Redis) -> list[str]:
+            async with r.pipeline(transaction=True) as pipe:
+                self._queue_append(pipe, key, entry)
+                pipe.lrange(key, 0, -1)
+                *_, raw = await pipe.execute()
+            return raw
+
+        raw = await self._guard.call(op, [])
+        return await self._complete(session, key, conversation_id, raw, entry.seq)
+
+    async def _complete(self, session: AsyncSession, key: str, conversation_id: uuid.UUID,
+                        raw: list[str], latest_seq: int) -> list[HistoryEntry]:
+        """The cached entries if they pass `_is_complete`, else rebuilt from the database."""
         cached = [_decode(x) for x in raw]
         if self._is_complete(cached, latest_seq):
             return cached
@@ -109,12 +130,15 @@ class HistoryCache:
 
         async def op(r: Redis) -> None:
             async with r.pipeline(transaction=True) as pipe:
-                pipe.rpushx(key, _encode(entry))
-                pipe.ltrim(key, -self._limit, -1)
-                pipe.expire(key, HISTORY_TTL_SECONDS)
+                self._queue_append(pipe, key, entry)
                 await pipe.execute()
 
         await self._guard.call(op, None)
+
+    def _queue_append(self, pipe, key: str, entry: HistoryEntry) -> None:
+        pipe.rpushx(key, _encode(entry))
+        pipe.ltrim(key, -self._limit, -1)
+        pipe.expire(key, HISTORY_TTL_SECONDS)
 
     async def invalidate(self, owner: str, conversation_id: uuid.UUID) -> None:
         await self._guard.call(lambda r: r.unlink(self.key(owner, conversation_id)), 0)
