@@ -1,7 +1,11 @@
 """How many times a turn waits on Postgres or Redis before its reply starts streaming.
 
 Every wait here comes before the first token, so each one is added to what the user
-waits for. The budgets are what a turn needs today; a change that adds a round trip to
+waits for. Counted until the streaming response is built (lookups the agent makes after
+that aren't counted), as SQL statements and commits and Redis commands or pipelines:
+on Postgres a transaction's BEGIN and a pool ping are trips too, not counted here.
+
+The budgets are what a turn needs today; a change that adds a round trip to
 this path should fail here and say why it is worth it.
 """
 
@@ -61,6 +65,7 @@ async def test_a_follow_up_turn_starts_streaming_within_its_round_trip_budget(
     headers = await (h.guest() if who == "guest" else h.user())  # members remember
     cid = await h.new_conversation(headers)
     await h.chat(headers, cid, "첫 질문")
+    await h.ctx.tasks.drain()  # the title task of the first message, so it isn't counted
     watch(h.ctx.engine)
     log.clear()
     marks.clear()
