@@ -18,7 +18,7 @@ Casey Muratori의 "Clean Code, Horrible Performance"(computerenhance.com) 관점
 | ② | `services/attachments.py` `images_for_turns` | 이미지 원본을 루프에서 하나씩 `await blobs.get` | `asyncio.gather`로 동시에 읽고 순서는 유지 | 완료(#49) |
 | ③ | `search_attachments`, `memory.recall`, `search_past_conversations` | 검색마다 BM25 인덱스를 처음부터 만듦. 첨부는 markdown 전체를 매번 읽고 다시 나눔 | 첨부는 변환 시 passage·term frequency를 미리 저장하거나 Postgres FTS. 메모리·지난 대화는 N이 작아 보류 | 첨부 완료: 인스턴스 캐시(아래). 메모리·지난 대화는 보류 |
 | ④ | `frontend/src/components/ChatPanel.tsx` | delta마다(그리고 입력 키마다) 모든 말풍선이 다시 렌더링되고, 지난 답변의 Markdown을 전부 다시 파싱. 비용이 메시지 수 × 토큰 수 | 말풍선을 `React.memo` 컴포넌트로 분리하고, 바뀌지 않은 말풍선은 props 참조가 그대로 유지되게 함 | 완료(#49) |
-| ⑤ | `services/memory.py` `forget_ids`, `forget_conversations` | 행 단위 delete 루프, comprehension 안에서 set 재생성 | `IN (...)` 한 번으로. 영향 작음 | 보류 |
+| ⑤ | `services/memory.py` `forget_ids`, `forget_conversations` | 행 단위 delete 루프, comprehension 안에서 set 재생성 | `IN (...)` 한 번으로. 영향 작음 | `forget_ids` 완료(아래). `forget_conversations`는 호출부가 늘 소유자 1명이라 이득 없음 |
 
 손대지 않는 것: `AgentStream`의 holdback 합계(80자 상한), `_estimated_usage`의 문자열 결합(중단 시에만), `Protocol` 경계.
 
@@ -55,4 +55,9 @@ Casey Muratori의 "Clean Code, Horrible Performance"(computerenhance.com) 관점
 - 만든 때부터 15분(`attachment_index_ttl_seconds`)이 지나면 버립니다. 삭제된 문서의 본문이 메모리에 남는 시간의 상한입니다.
 - 문단 수 합계 10,000(`attachment_index_max_passages`, 약 45MB)을 넘으면 가장 오래 쓰지 않은 것부터 버립니다. 인스턴스 메모리는 512Mi입니다.
 - 인스턴스마다 따로 캐시하므로 새 인스턴스에서는 첫 검색에 한 번 만듭니다.
+
+## ⑤ 기억 삭제 (2026-11-23)
+
+- `forget_ids`(agent의 forget 도구)는 잊을 사실을 고르려고 join이 든 기억 목록 전체를 읽고, 사실마다 DELETE 두 번(사실, 참조가 끊긴 엔티티)을 했습니다. id만 읽고, 사실은 `IN (...)` 한 번, 엔티티 정리는 한 번으로 줄였습니다. 세 개를 잊으면 DELETE 6회가 2회가 됩니다.
+- `forget_conversations`의 소유자별 루프는 그대로 둡니다. 호출부(대화 단건 삭제, 내 대화 전체 삭제)가 늘 한 소유자의 대화만 넘겨 루프가 한 번만 돕니다.
 

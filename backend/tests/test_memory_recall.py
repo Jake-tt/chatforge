@@ -107,6 +107,29 @@ async def test_forget_removes_a_memory_by_the_id_recall_showed(make_harness):
     assert await _facts(h, headers) == []
 
 
+async def test_forgetting_several_memories_deletes_them_together(make_harness):
+    from sqlalchemy import event
+
+    h, agent, headers, user_id = await _member(make_harness, [])
+    cid = await h.new_conversation(headers)
+    gone = [await _seed(h, user_id, cid, "나", p, value=v)
+            for p, v in (("좋아하는 음료", "라떼"), ("사는 곳", "부산"), ("직업", "개발자"))]
+    await _seed(h, user_id, cid, "나", "취미", value="달리기")
+    agent.script.extend([tool_call("forget", memory_ids=[f[:8] for f in gone]),
+                         AIMessage("잊었어요.")])
+    deletes: list[str] = []
+    event.listen(h.ctx.engine.sync_engine, "before_cursor_execute",
+                 lambda conn, cursor, sql, *a: deletes.append(sql)
+                 if sql.lstrip().upper().startswith("DELETE") else None)
+
+    await h.chat(headers, cid, "그 세 가지 잊어줘")
+
+    assert await _facts(h, headers) == [("나", "취미", "달리기")]
+    # The facts in one statement and the entities left unmentioned in one more, however
+    # many were asked for (it was two per fact).
+    assert len(deletes) == 2, deletes
+
+
 async def test_a_value_that_looks_like_a_card_number_is_not_remembered(make_harness):
     h, agent, headers, _ = await _member(make_harness, [
         tool_call("remember", subject="나", predicate="카드", object="4111 1111 1111 1111",

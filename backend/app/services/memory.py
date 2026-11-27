@@ -261,8 +261,14 @@ async def forget_ids(session: AsyncSession, user_id: uuid.UUID, short_ids: list[
     wanted = {s.strip().lower() for s in short_ids if len(s.strip()) >= SHORT_ID}
     if not wanted:
         return 0
-    ids = [f.id for f in await list_facts(session, user_id)
-           if str(f.id)[:SHORT_ID] in {w[:SHORT_ID] for w in wanted}]
-    for fact_id in ids:
-        await delete_fact(session, user_id, fact_id)
+    prefixes = {w[:SHORT_ID] for w in wanted}
+    ids = [i for i in await session.scalars(
+        select(MemoryFact.id).where(MemoryFact.user_id == user_id))
+        if str(i)[:SHORT_ID] in prefixes]
+    if not ids:
+        return 0
+    # All of them in one statement, then the entities they leave unmentioned in one more.
+    await session.execute(delete(MemoryFact).where(
+        MemoryFact.id.in_(ids), MemoryFact.user_id == user_id))
+    await _drop_orphans(session, user_id)
     return len(ids)
